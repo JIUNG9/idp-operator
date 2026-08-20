@@ -1,0 +1,62 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: servicedeployments.idp.jiung9.github.io
+spec:
+  group: idp.jiung9.github.io
+  names:
+    kind: ServiceDeployment
+    listKind: ServiceDeploymentList
+    plural: servicedeployments
+    singular: servicedeployment
+    shortNames: [svcdep]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Team
+          type: string
+          jsonPath: .spec.team
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [team, gitops]
+              properties:
+                team:
+                  type: string
+                replicas:
+                  type: integer
+                  format: int32
+                slo:
+                  type: object
+                  properties:
+                    availabilityTarget:
+                      type: string
+                    latencyP99Ms:
+                      type: integer
+                      format: int32
+                gitops:
+                  type: object
+                  required: [repoURL, path]
+                  properties:
+                    repoURL:
+                      type: string
+                    path:
+                      type: string
+                    targetRevision:
+                      type: string
+                    project:
+                      type: string
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

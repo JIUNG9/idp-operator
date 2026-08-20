@@ -1,0 +1,18 @@
+# One manifest = the whole golden path.
+# The operator provisions: namespace `orders-api` (team-labeled), an SLO
+# baseline ConfigMap (99.9% / 300ms p99 defaults if you write nothing),
+# a PodDisruptionBudget, and an ArgoCD Application syncing your overlay.
+apiVersion: idp.jiung9.github.io/v1alpha1
+kind: ServiceDeployment
+metadata:
+  name: orders-api
+  namespace: idp-system
+spec:
+  team: checkout
+  replicas: 3
+  slo:
+    availabilityTarget: "99.95"
+    latencyP99Ms: 250
+  gitops:
+    repoURL: https://github.com/acme-corp/orders-api-deploy
+    path: overlays/prod
