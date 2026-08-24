@@ -214,6 +214,26 @@ func TestReconcileDeleteCleansUp(t *testing.T) {
 	}
 }
 
+func TestReconcileDeleteBeforeProvisionIsClean(t *testing.T) {
+	// Deleting a CR whose children never got created must unwind cleanly:
+	// names are derived, deletes are idempotent, nothing to trip over.
+	sd := valid()
+	sd.Finalizers = []string{Finalizer}
+	c, r, req := newFixture(t, sd)
+	ctx := context.Background()
+
+	if err := c.Delete(ctx, getSD(t, c, sd.Name, sd.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("teardown of a never-provisioned CR must not error: %v", err)
+	}
+	var gone idpv1alpha1.ServiceDeployment
+	if err := c.Get(ctx, types.NamespacedName{Name: sd.Name, Namespace: sd.Namespace}, &gone); err == nil {
+		t.Fatal("finalizer must be removed even when nothing was provisioned")
+	}
+}
+
 func TestReconcileRefusesForeignNamespace(t *testing.T) {
 	sd := valid()
 	foreign := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "orders-api"}} // no labels: not ours
