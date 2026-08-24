@@ -234,8 +234,11 @@ func (r *ServiceDeploymentReconciler) finalize(ctx context.Context, sd *idpv1alp
 		return ctrl.Result{}, err
 	}
 
+	// Read through the uncached reader: the manager cache is label-filtered,
+	// so a namespace whose labels were mutated (or not yet synced) would look
+	// absent and the finalizer would be removed without deleting it — a leak.
 	var ns corev1.Namespace
-	switch err := r.Get(ctx, types.NamespacedName{Name: sd.Name}, &ns); {
+	switch err := r.reader().Get(ctx, types.NamespacedName{Name: sd.Name}, &ns); {
 	case apierrors.IsNotFound(err):
 		// already gone
 	case err != nil:
@@ -286,13 +289,18 @@ func (r *ServiceDeploymentReconciler) fail(ctx context.Context, sd *idpv1alpha1.
 // API servers do not). meta.SetStatusCondition keeps per-type history and
 // only bumps LastTransitionTime on a real transition.
 func (r *ServiceDeploymentReconciler) setStatus(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, phase string, conditions ...metav1.Condition) error {
+	// ObservedGeneration reports the generation this reconcile actually
+	// processed — sd's, not whatever is freshest at write time. A racing
+	// spec edit bumps the generation and gets its own reconcile; claiming
+	// it here would mark spec we never looked at as observed.
+	observed := sd.Generation
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var latest idpv1alpha1.ServiceDeployment
 		if err := r.Get(ctx, client.ObjectKeyFromObject(sd), &latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		latest.Status.Phase = phase
-		latest.Status.ObservedGeneration = latest.Generation
+		latest.Status.ObservedGeneration = observed
 		for _, c := range conditions {
 			apimeta.SetStatusCondition(&latest.Status.Conditions, c)
 		}
