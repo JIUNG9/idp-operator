@@ -6,7 +6,9 @@ manifest gets a team everything a production service needs on day one:
 - a **namespace**, labeled with ownership
 - an **SLO baseline** — a machine-readable reliability contract (`99.9%` availability,
   `300ms` p99 by default; silence is not an opt-out)
-- a **PodDisruptionBudget**, so disruption safety is the default, not a request
+- a **PodDisruptionBudget** derived from the declared replicas, so disruption safety
+  is the default, not a request (single-replica services get an honest status condition
+  instead of a drain-blocking fake PDB)
 - an **ArgoCD Application** — delivery is Git-to-production from the first commit
 
 ```yaml
@@ -44,7 +46,9 @@ The golden path is a reliability path.
 ## Roadmap
 
 - [ ] Finalizers + garbage collection of provisioned objects
-- [ ] `error-budget-gate` integration: budget-aware sync gating
+- [ ] Budget-aware sync gating, implementing the allow / require-human / block
+      verdict contract defined by `error-budget-gate` (natively in Go — shared
+      semantics, not shared code)
 - [ ] Kyverno policy baseline (signed images / Cosign verification)
 - [ ] NetworkPolicy default-deny baseline
 - [ ] Generated deepcopy + CRD via controller-gen
