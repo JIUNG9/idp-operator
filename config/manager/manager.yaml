@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: idp-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idp-operator
+  namespace: idp-system
+  labels:
+    app.kubernetes.io/name: idp-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: idp-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: idp-operator
+    spec:
+      serviceAccountName: idp-operator
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: manager
+          # Image publishing is wired in M4 (CI); until then build locally.
+          image: ghcr.io/jiung9/idp-operator:dev
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            # Memory limit only, on purpose: a memory-leaking operator should
+            # be killed; a CPU limit would just throttle reconciles.
+            limits:
+              memory: 128Mi

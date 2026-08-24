@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../crd/idp.jiung9.github.io_servicedeployments.yaml
+  - ../manager/manager.yaml
+  - ../rbac/role.yaml
+  - ../rbac/service_account.yaml
+  - ../rbac/role_binding.yaml
