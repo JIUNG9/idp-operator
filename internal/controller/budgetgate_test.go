@@ -408,6 +408,37 @@ func TestBudgetGateTightensOnceTheHoldExpires(t *testing.T) {
 	if !strings.Contains(cond.Message, "tightening") {
 		t.Fatalf("condition should say the hold expired: %q", cond.Message)
 	}
+
+	// The tightening has to be durable, or status says "allow" while
+	// delivery is manual — and the comparison on recovery is made against
+	// that stale allow.
+	after := getSD(t, c, sd.Name, sd.Namespace).Status.Budget
+	if after.Verdict != string(budget.RequireHuman) {
+		t.Fatalf("persisted verdict = %q, want require-human", after.Verdict)
+	}
+	// Nothing was measured here, so the staleness clock must not restart.
+	// (Compared as an age rather than an exact instant: metav1.Time is
+	// stored to second precision.)
+	if age := time.Since(after.LastEvaluationTime.Time); age < 9*time.Minute {
+		t.Fatalf("last evaluation is %s old; it was restamped as if something had been read", age)
+	}
+	if after.RemainingPercent != 90 || after.Source == "broken" {
+		t.Fatalf("the last real reading must stay on the record: %+v", after)
+	}
+
+	// Prometheus comes back healthy. That is a loosening, and loosening
+	// serves the three-reading rule like any other — the outage must not
+	// have bought a shortcut.
+	r.BurnSource = budget.StaticSource{Value: 0.95}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if automatedSync(t, c) {
+		t.Fatal("the first healthy reading after an expired hold must not reopen automated delivery")
+	}
+	if s := getSD(t, c, sd.Name, sd.Namespace).Status.Budget.Streak; s != 1 {
+		t.Fatalf("streak = %d, want 1 — recovery starts the loosening rule from the beginning", s)
+	}
 }
 
 func TestBudgetGateNeverLoosensOnAnUnreadableSource(t *testing.T) {

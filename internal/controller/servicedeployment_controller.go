@@ -545,6 +545,14 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 			held = budget.RequireHuman
 		}
 
+		// Make the verdict in force durable. Without this, status keeps
+		// saying "allow" while the Application has already lost automated
+		// sync — the status lies — and worse, the first healthy reading
+		// after recovery compares against that stale "allow", finds no
+		// loosening to do, and walks straight back to unattended delivery
+		// without serving the three-reading rule at all.
+		sd.Status.Budget = carryForward(prev, held)
+
 		detail := fmt.Sprintf("holding %q", held)
 		if expired {
 			detail = fmt.Sprintf("no reading within %s, so tightening to %q", r.staleVerdictGrace(), held)
@@ -599,6 +607,26 @@ func (c *components) budgetCondition(verdict budget.Verdict, message string) {
 		reason = "ErrorBudgetExhausted"
 	}
 	c.degrade(CondBudgetGateReady, reason, message)
+}
+
+// carryForward records a verdict reached without a fresh reading.
+//
+// The measurement fields keep whatever the last real reading said, and
+// LastEvaluationTime is deliberately not restamped: nothing here measured
+// anything, and pretending otherwise would reset the staleness clock the
+// grace period depends on.
+func carryForward(prev *idpv1alpha1.BudgetStatus, held budget.Verdict) *idpv1alpha1.BudgetStatus {
+	out := &idpv1alpha1.BudgetStatus{Verdict: string(held)}
+	if prev != nil {
+		copied := *prev
+		out = &copied
+		out.Verdict = string(held)
+		if prev.Verdict != string(held) {
+			// The gate moved, so any streak toward a looser verdict is void.
+			out.Streak = 0
+		}
+	}
+	return out
 }
 
 // resolveVerdict applies the anti-flapping rule: a tighter verdict takes
