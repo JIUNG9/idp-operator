@@ -5,35 +5,42 @@ criteria pass, not when the code exists. Status today: the golden-path reconcile
 (namespace → SLO baseline → PodDisruptionBudget → ArgoCD Application), spec validation
 with status reporting, and fake-client tests at 90% controller coverage.
 
-## M1 — correctness hardening
+## M1 — correctness hardening ✅ (v0.2.0)
 
 The reconciler creates objects; it doesn't yet own their whole lifecycle.
 
-- [ ] Finalizer (`idp.jiung9.github.io/cleanup`) + garbage collection of everything
+- [x] Finalizer (`idp.jiung9.github.io/cleanup`) + garbage collection of everything
       provisioned. Deletion order: ArgoCD Application first, then the namespace (which
       cascades to the ConfigMap/PDB inside it). Every delete is idempotent — partial
       provisioning is safe to unwind because object names are derived, never stored.
       Why a finalizer and not ownerReferences: the namespace is cluster-scoped and the
       Application lives in `argocd` — both outside the CR's namespace, where ownerRefs
       are illegal.
-- [ ] PDB derived from `spec.replicas` instead of a hardcoded `minAvailable: 1`:
+- [x] PDB derived from `spec.replicas` instead of a hardcoded `minAvailable: 1`:
       replicas ≥ 2 → `maxUnavailable: 1` · replicas ≤ 1 → **no PDB**, plus a status
       condition saying why. A single-replica service can't be disruption-safe;
       `minAvailable: 1` would just block node drains without protecting anything. The
       condition makes "intentionally unprotected" distinguishable from "misconfigured".
-- [ ] Conditions managed with `meta.SetStatusCondition` (real transition times, per-type
+- [x] Conditions managed with `meta.SetStatusCondition` (real transition times, per-type
       history) — lands before any later milestone adds more condition types.
-- [ ] Defaults move into the CRD schema (`+kubebuilder:default`); in-controller
+- [x] Defaults move into the CRD schema (`+kubebuilder:default`); in-controller
       defaulting stays as idempotent defense-in-depth.
-- [ ] Drift detection: label-mapped `Watches()` on provisioned objects (ownerRefs can't
+- [x] Drift detection: label-mapped `Watches()` on provisioned objects (ownerRefs can't
       cover cluster-scoped or cross-namespace children, so drift is re-queued by label).
-- [ ] RBAC markers + generated role; installable `config/` manifests.
-- [ ] `controller-gen`: generated deepcopy + CRD manifests replace the hand-written ones.
-- [ ] envtest suite alongside the fake-client tests — reconcile against real API-server
+- [x] RBAC markers + generated role; installable `config/` manifests.
+- [x] `controller-gen`: generated deepcopy + CRD manifests replace the hand-written ones.
+- [x] envtest suite alongside the fake-client tests — reconcile against real API-server
       semantics (conflicts, resourceVersion, deletion timestamps).
 
 **Exit:** create → verify → delete round-trip green in envtest (including deletion
-mid-provision); `go vet` clean; generated output committed and in sync.
+mid-provision); `go vet` clean; generated output committed and in sync. **Met.**
+
+Two guards were added that the original list didn't anticipate, both from reconciling
+against a real API server: the namespace-ownership check (refuse to adopt a namespace
+this operator didn't create, or one owned by another `ServiceDeployment`) and reading
+that check through an uncached reader, because the manager cache is label-filtered and
+would otherwise hide a foreign namespace — during teardown that gap would have released
+the finalizer without deleting anything.
 
 ## M2 — policy baseline
 
