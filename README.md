@@ -49,6 +49,11 @@ This is a young project and says so. What works today:
 - Spec validation with clear rejection reasons (surfaced in `.status`)
 - Unit, fake-client, and envtest suites (`make test`)
 
+Not yet demonstrated: the kind-based end-to-end test exists (`test/e2e/e2e.sh`) but
+has not been run green, so the claim that the Kyverno baseline *rejects* a
+privileged pod — as opposed to being installed — is not yet backed by a passing
+test. That is what the e2e is for.
+
 ## Why SLO-first
 
 Most IDPs treat reliability as something teams add later. This one bakes the SLO
@@ -195,6 +200,13 @@ actually rejects a privileged or unsigned pod, rather than merely being installe
 make tools     # controller-gen + setup-envtest
 make test      # vet + unit + envtest
 make manifests # regenerate CRD and RBAC from markers
+```
+
+The end-to-end test needs Docker and kind. It creates a throwaway cluster and
+deletes it on exit:
+
+```
+./test/e2e/e2e.sh          # KEEP=1 to leave the cluster up for inspection
 ```
 
 ## License

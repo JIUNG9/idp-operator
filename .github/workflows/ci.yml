@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install tools
+        run: make tools
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # Generated code and manifests are committed, so they can drift from the
+      # markers that produce them. A reviewer reading the CRD should be able to
+      # trust it matches the types.
+      - name: Check generated output is in sync
+        run: |
+          make generate manifests
+          if ! git diff --exit-code; then
+            echo "::error::generated output is stale — run 'make generate manifests' and commit the result"
+            exit 1
+          fi
+
+      - name: Test (unit + envtest)
+        run: make test
+
+      - name: Coverage summary
+        run: go tool cover -func=cover.out | tail -1
+
+  e2e:
+    name: e2e on kind
+    runs-on: ubuntu-latest
+    # The e2e builds an image and stands up a cluster, so it runs on demand
+    # rather than on every push: label the PR `e2e`, or run it manually.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'e2e')
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: idp-e2e
+          # Skip creating a cluster here; the script owns its own lifecycle.
+          install_only: true
+      - name: Run e2e
+        run: ./test/e2e/e2e.sh
