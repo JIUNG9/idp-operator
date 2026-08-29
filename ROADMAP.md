@@ -82,33 +82,42 @@ dependency, which is M4's territory. The declaration (`spec.network.allowEgressT
 turning declared dependencies into policy) is the natural follow-up and belongs in
 its own milestone, not smuggled into this one untested.
 
-## M3 — budget-aware delivery (the point of the project)
+## M3 — budget-aware delivery ✅ (v0.4.0)
 
-Enforce the SLO baseline via the **allow / require-human / block** verdict contract
-that [error-budget-gate](https://github.com/JIUNG9/error-budget-gate) defines. That
-project is Python; this operator implements the same contract natively in Go — the two
-share semantics, not code.
+The SLO baseline is enforced, not just declared: a service's remaining error budget
+decides whether ArgoCD may sync it unattended.
 
-- [ ] `spec.tier` (0–3) and `spec.environment` join the API. The gated action is fixed
-      by construction: automated ArgoCD sync to a declared Git revision — reversible,
-      because revert is a sync to the previous revision.
-- [ ] `internal/budget`: verdict(tier, env, budget_remaining) with error-budget-gate's
-      thresholds (block on exhausted budget or tier-0 prod; require-human on prod or
-      <25% remaining; allow otherwise), unit-tested against its documented cases.
-- [ ] `BurnSource` interface returning normalized `budget_remaining` ∈ [0,1]
-      (1 − observed error rate ÷ allowed error rate, over the SLO window):
-      a Prometheus implementation (documented query shape) + a static implementation
-      for tests and the demo.
-- [ ] The verdict is persisted state, not an in-memory opinion — `status.budget` holds
-      verdict, budgetRemaining, streak, lastEvaluationTime. Deterministic sync-policy
-      mapping: allow → automated sync · require-human → manual sync + condition ·
-      block → automated sync removed + condition. Tightening applies immediately
-      (fail closed); loosening needs N consecutive evaluations, and the streak survives
-      operator restarts because it lives in status.
-- [ ] Tests for all three verdicts, verdict flapping, and restart survival.
+- [x] `spec.tier` (0–3) and `spec.environment` join the API. The gated action is fixed
+      by construction: automated sync to a declared Git revision — reversible, because
+      revert is a sync to the previous revision.
+- [x] `internal/budget`: verdict(tier, environment, remaining) sharing
+      [error-budget-gate](https://github.com/JIUNG9/error-budget-gate)'s vocabulary and
+      thresholds, with **one deliberate divergence** — production alone does not require
+      a human here, because the gated action is a human's own reviewed commit rather
+      than a remediation a robot invented. The full comparison is in the README and on
+      `Evaluate`.
+- [x] `BurnSource` returning normalized remaining budget ∈ [0,1]: a Prometheus
+      implementation over a configurable query template, and a static one for demos.
+      A source that errors, returns no series, or returns NaN is **no evidence** — never
+      a healthy budget.
+- [x] The verdict is persisted state in `status.budget` (verdict, reading, streak,
+      source, timestamp), so it survives operator restarts. Tightening applies
+      immediately; relaxing waits for `LooseningStreak` agreeing readings.
+- [x] Tests for all three verdicts, flapping, restart survival, and failing closed.
 
-**Exit:** envtest demo — a budget-exhausted service loses automated sync, the
-`ServiceDeployment` status explains it, and the verdict survives an operator restart.
+**Exit:** envtest — an exhausted budget takes automated sync off the real Application
+object, `.status` explains it, a restarted operator does not restore it on the first
+healthy reading, and it converges back to automated once the budget genuinely recovers.
+**Met.**
+
+### The bug envtest found that the unit tests could not
+
+The anti-flapping rule first counted **reconciles**. Writing status triggers a watch
+event, which triggers another reconcile, so the streak burned from 0 to 3 in
+milliseconds and the gate reopened almost the instant a budget blipped upward — the
+exact behaviour the rule exists to prevent. Unit tests could never show it: they call
+`Reconcile` by hand, so the loop never runs. Re-evaluation is now paced by elapsed
+time, which also stops the operator querying Prometheus once per event.
 
 ## M4 — ship
 
