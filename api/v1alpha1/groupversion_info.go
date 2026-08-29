@@ -1,4 +1,7 @@
 // Package v1alpha1 contains the API types for the idp-operator golden path.
+//
+// +kubebuilder:object:generate=true
+// +groupName=idp.jiung9.github.io
 package v1alpha1
 
 import (

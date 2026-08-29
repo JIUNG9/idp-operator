@@ -1,0 +1,67 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idp-operator
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - namespaces
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - applications
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - idp.jiung9.github.io
+  resources:
+  - servicedeployments
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - idp.jiung9.github.io
+  resources:
+  - servicedeployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - idp.jiung9.github.io
+  resources:
+  - servicedeployments/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
