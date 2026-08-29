@@ -203,6 +203,29 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return res, r.setStatus(ctx, &sd, PhaseProvisioned, c.all()...)
 }
 
+// applyManaged creates or updates an object the golden path owns.
+//
+// controllerutil.CreateOrUpdate reads through the manager cache, which is
+// filtered to this operator's own labels. An object that exists but carries
+// different labels is invisible there, so the read says "absent", the create
+// loses to the real object, and the reconcile wedges on AlreadyExists forever
+// — a stray NetworkPolicy named like ours would be enough to stop a service
+// being provisioned. When that happens, read the truth uncached and take the
+// object over: these are guardrails, and the operator is their owner.
+func (r *ServiceDeploymentReconciler) applyManaged(ctx context.Context, obj client.Object, mutate controllerutil.MutateFn) error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, obj, mutate)
+	if !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+		return err
+	}
+	if err := mutate(); err != nil {
+		return err
+	}
+	return r.Update(ctx, obj)
+}
+
 // reconcileNamespace creates the service's home, refusing to adopt a
 // namespace this operator didn't create or one another ServiceDeployment
 // already owns — without that guard, two ServiceDeployments of the same name
@@ -222,7 +245,7 @@ func (r *ServiceDeploymentReconciler) reconcileNamespace(ctx context.Context, sd
 	}
 
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: sd.Name}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
+	if err := r.applyManaged(ctx, ns, func() error {
 		if ns.Labels == nil {
 			ns.Labels = map[string]string{}
 		}
@@ -240,7 +263,7 @@ func (r *ServiceDeploymentReconciler) reconcileNamespace(ctx context.Context, sd
 // reconcileSLOBaseline writes the reliability contract other tooling reads.
 func (r *ServiceDeploymentReconciler) reconcileSLOBaseline(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "slo-baseline", Namespace: sd.Name}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+	if err := r.applyManaged(ctx, cm, func() error {
 		cm.Labels = labels
 		cm.Data = map[string]string{
 			"availability_target": sd.Spec.SLO.AvailabilityTarget,
@@ -271,7 +294,7 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 	}
 
 	pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: sd.Name, Namespace: sd.Name}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
+	if err := r.applyManaged(ctx, pdb, func() error {
 		pdb.Labels = labels
 		maxUnavailable := intstr.FromInt32(1)
 		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
@@ -292,12 +315,11 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 func (r *ServiceDeploymentReconciler) reconcileNetworkPolicies(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	apply := func(name string, spec networkingv1.NetworkPolicySpec) error {
 		np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sd.Name}}
-		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		return r.applyManaged(ctx, np, func() error {
 			np.Labels = labels
 			np.Spec = spec
 			return nil
 		})
-		return err
 	}
 
 	if err := apply(NetworkPolicyDenyIngress, DenyIngressSpec()); err != nil {
@@ -349,16 +371,24 @@ func (r *ServiceDeploymentReconciler) reconcileAdmissionPolicy(ctx context.Conte
 	pol.SetGroupVersionKind(KyvernoPolicyGVK)
 	pol.SetName(KyvernoPolicyName)
 	pol.SetNamespace(sd.Name)
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, pol, func() error {
+	if err := r.applyManaged(ctx, pol, func() error {
 		pol.SetLabels(labels)
 		return unstructured.SetNestedMap(pol.Object, KyvernoPolicySpec(r.Policy), "spec")
 	}); err != nil {
 		return err
 	}
 
-	message := "enforcing " + strings.Join(KyvernoRuleNames(r.Policy), ", ")
+	// "Provisioned", not "Enforced": this operator wrote a policy the API
+	// server accepted. Whether it is enforced depends on Kyverno's admission
+	// webhook being healthy, which is Kyverno's business and is not checked
+	// here — a broken Kyverno would admit privileged pods while this
+	// condition still reads green.
+	message := "policy accepted, declaring " + strings.Join(KyvernoRuleNames(r.Policy), ", ") +
+		" (enforcement depends on Kyverno's webhook, which this operator does not verify)"
 	if !r.Policy.ImageVerificationConfigured() {
 		message += "; image signatures are NOT verified (no signing identity configured on the operator)"
+	} else if !r.Policy.RequireImageDigests {
+		message += "; images verified by tag, so a tag moved after admission is not re-checked (-require-image-digests closes this)"
 	}
 	c.ready(CondAdmissionPolicyReady, "Provisioned", message)
 	return nil
@@ -370,7 +400,7 @@ func (r *ServiceDeploymentReconciler) reconcileApplication(ctx context.Context, 
 	app.SetGroupVersionKind(ApplicationGVK)
 	app.SetName(sd.Name)
 	app.SetNamespace(ArgoCDNamespace)
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, app, func() error {
+	if err := r.applyManaged(ctx, app, func() error {
 		app.SetLabels(labels)
 		return unstructured.SetNestedMap(app.Object, map[string]any{
 			"project": sd.Spec.GitOps.Project,

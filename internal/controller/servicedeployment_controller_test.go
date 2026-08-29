@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -18,6 +19,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
 )
@@ -529,5 +531,47 @@ func TestReconcileFailureNamesTheBrokenComponent(t *testing.T) {
 	// Steps after the failure never ran, so they must not claim readiness.
 	if apimeta.FindStatusCondition(got.Status.Conditions, CondDeliveryReady) != nil {
 		t.Fatal("a step that never ran must not report a condition")
+	}
+}
+
+func TestReconcileAdoptsAnObjectTheCacheCannotSee(t *testing.T) {
+	// The manager cache is filtered to this operator's labels, so an
+	// existing object with different labels reads as absent. Without the
+	// uncached fallback the create loses with AlreadyExists and the service
+	// never gets provisioned again.
+	sd := valid()
+	squatter := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      NetworkPolicyDenyIngress,
+			Namespace: "orders-api",
+			Labels:    map[string]string{"owner": "someone-else"},
+		},
+	}
+	base := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithObjects(sd, squatter).WithStatusSubresource(sd).Build()
+
+	// Client behaves like the filtered cache: it cannot see the squatter.
+	hidden := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*networkingv1.NetworkPolicy); ok && key.Name == NetworkPolicyDenyIngress {
+				return apierrors.NewNotFound(networkingv1.Resource("networkpolicies"), key.Name)
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	r := &ServiceDeploymentReconciler{Client: hidden, Reader: base}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sd.Name, Namespace: sd.Namespace}}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("a stray same-named policy must not wedge the reconcile: %v", err)
+	}
+
+	// The operator owns its guardrails: the object is taken over, not left.
+	np := getNetworkPolicy(t, base, NetworkPolicyDenyIngress)
+	if np.Labels[LabelManagedBy] != ManagedByValue {
+		t.Fatalf("policy should have been adopted, labels = %v", np.Labels)
+	}
+	if len(np.Spec.PolicyTypes) != 1 || np.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress {
+		t.Fatalf("adopted policy must carry our spec: %+v", np.Spec)
 	}
 }

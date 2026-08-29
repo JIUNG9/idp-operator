@@ -111,6 +111,17 @@ type PolicyConfig struct {
 	CosignSubject string
 	// ImageReferences are the image globs verification applies to.
 	ImageReferences []string
+	// RequireImageDigests rejects images referenced by tag.
+	//
+	// Verifying a tag is a check with a shelf life: the tag can be moved to
+	// an unsigned image after admission, or before the kubelet pulls it, and
+	// what runs is not what was verified. Closing that gap means the workload
+	// must name a digest — and since this operator refuses to rewrite the
+	// reference itself (it would fight ArgoCD selfHeal), the digest has to
+	// come from the pipeline that builds the manifests. Off by default
+	// because turning it on rejects every tag-based manifest in the cluster;
+	// turn it on once your pipeline pins digests.
+	RequireImageDigests bool
 }
 
 // ImageVerificationConfigured reports whether the operator was given anything
@@ -201,10 +212,11 @@ func KyvernoPolicySpec(p PolicyConfig) map[string]any {
 				// Git and syncs the tag back, Kyverno mutates again. Verify
 				// the signature; leave the reference alone.
 				"mutateDigest": false,
-				// With no mutation, demanding a digest would reject every
-				// tag-based manifest. Pinning belongs in the build pipeline
-				// that produces the manifests, not in admission.
-				"verifyDigest": false,
+				// With no mutation, demanding a digest rejects every
+				// tag-based manifest, so it is opt-in — but leaving it off
+				// means a verified tag can be moved afterwards and the pod
+				// runs an image nobody checked. See RequireImageDigests.
+				"verifyDigest": p.RequireImageDigests,
 				"attestors":    []any{map[string]any{"entries": []any{p.attestor()}}},
 			}},
 		})
