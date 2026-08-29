@@ -276,6 +276,9 @@ func TestBudgetGateFailsClosedWithNoPriorVerdict(t *testing.T) {
 }
 
 func TestBudgetGateHoldsTheLastVerdictWhenTheSourceBreaks(t *testing.T) {
+	// Within the grace period the last measured verdict stands: a Prometheus
+	// restart is not a reliability event, and turning every scrape blip into
+	// a delivery freeze teaches people to rip the gate out.
 	sd := valid()
 	c, r, req := newFixtureOpts(t, sd, nil, withBudget(budget.StaticSource{Value: 0.9}))
 	ctx := context.Background()
@@ -286,21 +289,28 @@ func TestBudgetGateHoldsTheLastVerdictWhenTheSourceBreaks(t *testing.T) {
 		t.Fatal("expected an open gate to start with")
 	}
 
-	// Prometheus falls over. The last thing actually measured said healthy,
-	// so that is what is held — not a fresh guess in either direction.
+	// Age the reading past the re-evaluation interval (so a fresh read is
+	// attempted) but well inside the grace period (so the hold is valid).
+	r.ReevaluationInterval = time.Minute
+	aged := metav1.NewTime(time.Now().Add(-90 * time.Second))
+	live := getSD(t, c, sd.Name, sd.Namespace)
+	live.Status.Budget.LastEvaluationTime = &aged
+	if err := c.Status().Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
 	r.BurnSource = brokenSource{}
+
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatal(err)
 	}
 	if !automatedSync(t, c) {
-		t.Fatal("holding the last verdict means holding allow, not inventing a stop")
+		t.Fatal("inside the grace period, holding the last verdict means holding allow")
 	}
 	if cond := budgetCond(t, c, sd); !strings.Contains(cond.Message, `holding "allow"`) {
 		t.Fatalf("condition should name the verdict being held: %q", cond.Message)
 	}
 	// The stale reading must not be restamped as if it were fresh.
-	got := getSD(t, c, sd.Name, sd.Namespace)
-	if got.Status.Budget.Source == "broken" {
+	if got := getSD(t, c, sd.Name, sd.Namespace); got.Status.Budget.Source == "broken" {
 		t.Fatal("a failed read must not overwrite the record of the last real one")
 	}
 }
@@ -360,5 +370,117 @@ func TestBudgetGateHoldsAStandingVerdict(t *testing.T) {
 	}
 	if cond := budgetCond(t, c, sd); !strings.Contains(cond.Message, "standing verdict") {
 		t.Fatalf("the condition should say the verdict is standing, not freshly measured: %q", cond.Message)
+	}
+}
+
+func TestBudgetGateTightensOnceTheHoldExpires(t *testing.T) {
+	// Holding the last verdict through a brief outage is right. Holding it
+	// forever is not: monitoring fails alongside the things it monitors, so
+	// an unbounded hold keeps delivery unattended through exactly the
+	// incident nobody can see.
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, nil, withBudget(budget.StaticSource{Value: 0.9}))
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if !automatedSync(t, c) {
+		t.Fatal("expected an open gate to start with")
+	}
+
+	// Age the last real reading past the grace period, then break the source.
+	r.ReevaluationInterval = time.Minute
+	stale := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	live := getSD(t, c, sd.Name, sd.Namespace)
+	live.Status.Budget.LastEvaluationTime = &stale
+	if err := c.Status().Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	r.BurnSource = brokenSource{}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if automatedSync(t, c) {
+		t.Fatal("an allow nobody has been able to re-measure for three intervals must not keep standing")
+	}
+	cond := budgetCond(t, c, sd)
+	if !strings.Contains(cond.Message, "tightening") {
+		t.Fatalf("condition should say the hold expired: %q", cond.Message)
+	}
+}
+
+func TestBudgetGateNeverLoosensOnAnUnreadableSource(t *testing.T) {
+	// A block that cannot be re-measured stays a block; the grace rule
+	// tightens, it never relaxes.
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, nil, withBudget(budget.StaticSource{Value: 0}))
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+
+	r.ReevaluationInterval = time.Minute
+	stale := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	live := getSD(t, c, sd.Name, sd.Namespace)
+	live.Status.Budget.LastEvaluationTime = &stale
+	if err := c.Status().Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	r.BurnSource = brokenSource{}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if v := getSD(t, c, sd.Name, sd.Namespace).Status.Budget.Verdict; v != string(budget.Block) {
+		t.Fatalf("verdict = %q; an expired hold must not weaken a block", v)
+	}
+}
+
+func TestBudgetGateRereadsOnAFutureTimestamp(t *testing.T) {
+	// A timestamp in the future — clock skew, or a hand-edited status —
+	// would otherwise hold a verdict indefinitely, since age stays below the
+	// interval forever.
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, nil, func(r *ServiceDeploymentReconciler) {
+		r.BurnSource = budget.StaticSource{Value: 0.9}
+		r.ReevaluationInterval = time.Hour
+	})
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+
+	future := metav1.NewTime(time.Now().Add(24 * time.Hour))
+	live := getSD(t, c, sd.Name, sd.Namespace)
+	live.Status.Budget.LastEvaluationTime = &future
+	live.Status.Budget.RemainingPercent = 99
+	if err := c.Status().Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	r.BurnSource = budget.StaticSource{Value: 0}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	if got.Status.Budget.Verdict != string(budget.Block) {
+		t.Fatalf("a future timestamp must force a fresh reading, got verdict %q", got.Status.Budget.Verdict)
+	}
+}
+
+func TestBudgetStatusRecordsWhatTheGateBelieved(t *testing.T) {
+	// environment and tier are self-service fields that weaken the verdict,
+	// so the decision records them: relabelling prod as dev to win back
+	// automated delivery shows up in the object's own status.
+	sd := valid()
+	sd.Spec.Environment = "dev"
+	sd.Spec.Tier = ptr(int32(1))
+	c, r, req := newFixtureOpts(t, sd, nil, withBudget(budget.StaticSource{Value: 0.05}))
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	b := getSD(t, c, sd.Name, sd.Namespace).Status.Budget
+	if b.Environment != "dev" || b.Tier != 1 {
+		t.Fatalf("the gate must record the inputs that weakened it: %+v", b)
 	}
 }

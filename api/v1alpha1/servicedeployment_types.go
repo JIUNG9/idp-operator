@@ -113,6 +113,12 @@ type BudgetStatus struct {
 	Streak int32 `json:"streak,omitempty"`
 	// Source names where the reading came from.
 	Source string `json:"source,omitempty"`
+	// Environment and Tier record what the gate believed about the service
+	// when it decided. Both are self-service spec fields that weaken the
+	// verdict, so the decision carries them: a service relabelled to dev to
+	// win back automated delivery says so in its own status.
+	Environment string `json:"environment,omitempty"`
+	Tier        int32  `json:"tier,omitempty"`
 	// LastEvaluationTime is when the reading was taken.
 	// +optional
 	LastEvaluationTime *metav1.Time `json:"lastEvaluationTime,omitempty"`
