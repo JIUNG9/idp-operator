@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -24,8 +25,12 @@ import (
 )
 
 // TestEnvtestLifecycle is the create → verify → delete round-trip against a
-// real API server: CRD schema defaulting, resourceVersion conflicts, and
-// deletion timestamps — everything the fake client fakes away.
+// real API server: CRD schema defaulting, status subresource semantics, real
+// finalizer and deletion-timestamp handling, and objects a real validator has
+// accepted — things the fake client approximates or skips.
+//
+// The conflict-retry paths are covered deterministically by
+// TestSetStatusRetriesOnConflict rather than by racing this test.
 func TestEnvtestLifecycle(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS not set — run via `make test`")
@@ -49,7 +54,15 @@ func TestEnvtestLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &ServiceDeploymentReconciler{Client: mgr.GetClient(), Reader: mgr.GetAPIReader()}
+	r := &ServiceDeploymentReconciler{
+		Client: mgr.GetClient(),
+		Reader: mgr.GetAPIReader(),
+		Network: NetworkConfig{
+			AllowIngressFromNamespaces: []string{"ingress-nginx"},
+			AllowIngressFromCIDRs:      []string{"10.0.0.0/16"},
+		},
+		Policy: PolicyConfig{CosignPublicKey: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----"},
+	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +133,34 @@ func TestEnvtestLifecycle(t *testing.T) {
 	var pdb policyv1.PodDisruptionBudget
 	if err := c.Get(ctx, types.NamespacedName{Name: "orders-api", Namespace: "orders-api"}, &pdb); !apierrors.IsNotFound(err) {
 		t.Fatalf("single replica must have no PDB, got err=%v", err)
+	}
+
+	// ---- policy: both planes, validated by a real API server ----
+	for _, name := range []string{NetworkPolicyDenyIngress, NetworkPolicyAllowSameNS, NetworkPolicyAllowPlatform} {
+		var np networkingv1.NetworkPolicy
+		if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: "orders-api"}, &np); err != nil {
+			t.Fatalf("network policy %q: %v", name, err)
+		}
+		if len(np.Spec.PolicyTypes) != 1 || np.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress {
+			t.Fatalf("%s must not touch egress: %v", name, np.Spec.PolicyTypes)
+		}
+	}
+
+	// The Kyverno CRD is installed (test/crds), so the baseline is provisioned.
+	// envtest runs no admission webhooks, so this asserts the policy exists and
+	// says what it should — the M4 kind e2e is what proves it rejects a pod.
+	pol := &unstructured.Unstructured{}
+	pol.SetGroupVersionKind(KyvernoPolicyGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: KyvernoPolicyName, Namespace: "orders-api"}, pol); err != nil {
+		t.Fatalf("kyverno policy: %v", err)
+	}
+	rules, found, err := unstructured.NestedSlice(pol.Object, "spec", "rules")
+	if err != nil || !found || len(rules) != 3 {
+		t.Fatalf("expected 3 rules through a real API server, got %d (%v)", len(rules), err)
+	}
+	verify := rules[2].(map[string]any)["verifyImages"].([]any)[0].(map[string]any)
+	if verify["mutateDigest"] != false || verify["verifyDigest"] != false {
+		t.Fatalf("digest flags must survive a real round-trip as false: %+v", verify)
 	}
 
 	// ---- scale up: PDB appears with maxUnavailable=1 ----
