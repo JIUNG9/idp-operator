@@ -507,7 +507,10 @@ func (r *ServiceDeploymentReconciler) fail(ctx context.Context, sd *idpv1alpha1.
 	if serr := r.setStatus(ctx, sd, PhaseError, conds...); serr != nil {
 		return ctrl.Result{}, serr
 	}
-	return ctrl.Result{}, fmt.Errorf("%s", msg)
+	// Wrap rather than flatten: whether this was RBAC, discovery, or a
+	// conflict is the first thing anyone reading the logs wants to know,
+	// and errors.Is/As stop working the moment it becomes a string.
+	return ctrl.Result{}, fmt.Errorf("%s: %w", component, err)
 }
 
 // setStatus persists phase + conditions against the freshest copy, retrying

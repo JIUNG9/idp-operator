@@ -39,6 +39,21 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 	setupLog := ctrl.Log.WithName("setup")
 
+	// Fail fast on a half-configured trust root. Every one of these would
+	// otherwise start cleanly and verify against the wrong thing, or against
+	// nothing at all, which is the failure you least want to discover from a
+	// running cluster.
+	switch {
+	case *cosignKeyFile != "" && (*cosignIssuer != "" || *cosignSubject != ""):
+		setupLog.Error(nil, "set either -cosign-key-file or -cosign-issuer with -cosign-subject, not both: "+
+			"a key and a keyless identity are two different trust roots")
+		os.Exit(1)
+	case (*cosignIssuer == "") != (*cosignSubject == ""):
+		setupLog.Error(nil, "keyless verification needs both -cosign-issuer and -cosign-subject; "+
+			"with only one, images would silently not be verified at all")
+		os.Exit(1)
+	}
+
 	policyConfig := controller.PolicyConfig{
 		CosignIssuer:        *cosignIssuer,
 		CosignSubject:       *cosignSubject,
@@ -58,6 +73,11 @@ func main() {
 	if !policyConfig.ImageVerificationConfigured() {
 		setupLog.Info("no signing identity configured; image signatures will NOT be verified " +
 			"(set -cosign-key-file, or -cosign-issuer with -cosign-subject)")
+		if *requireDigests {
+			// The digest requirement lives inside the verification rule, so
+			// without a signing identity there is no rule to carry it.
+			setupLog.Info("-require-image-digests has no effect without a signing identity")
+		}
 	}
 
 	scheme := clientgoscheme.Scheme

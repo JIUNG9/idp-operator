@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -573,5 +574,57 @@ func TestReconcileAdoptsAnObjectTheCacheCannotSee(t *testing.T) {
 	}
 	if len(np.Spec.PolicyTypes) != 1 || np.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress {
 		t.Fatalf("adopted policy must carry our spec: %+v", np.Spec)
+	}
+}
+
+func TestSetStatusRetriesOnConflict(t *testing.T) {
+	// A status write can lose to a concurrent update; losing once must not
+	// lose the status. Forced deterministically rather than raced.
+	sd := valid()
+	base := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithObjects(sd).WithStatusSubresource(sd).Build()
+
+	var conflicts int
+	flaky := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if conflicts == 0 {
+				conflicts++
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: "idp.jiung9.github.io", Resource: "servicedeployments"},
+					obj.GetName(), errors.New("object was modified"))
+			}
+			return cl.Status().Update(ctx, obj, opts...)
+		},
+	})
+	r := &ServiceDeploymentReconciler{Client: flaky, Reader: base}
+
+	if err := r.setStatus(context.Background(), sd, PhaseProvisioned,
+		newCondition(sd, CondProvisioned, metav1.ConditionTrue, "Reconciled", "ok")); err != nil {
+		t.Fatalf("a single conflict must be retried, not surfaced: %v", err)
+	}
+	if conflicts != 1 {
+		t.Fatalf("expected the conflict path to be exercised, got %d", conflicts)
+	}
+	got := getSD(t, base, sd.Name, sd.Namespace)
+	if got.Status.Phase != PhaseProvisioned {
+		t.Fatalf("status lost to the conflict: %+v", got.Status)
+	}
+}
+
+func TestFailWrapsTheUnderlyingError(t *testing.T) {
+	sd := valid()
+	foreign := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "orders-api"}}
+	_, r, req := newFixture(t, sd, foreign)
+
+	_, err := r.Reconcile(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	// The component name must survive for the logs, and so must the cause.
+	if !strings.HasPrefix(err.Error(), "namespace: ") {
+		t.Fatalf("error should name the component: %v", err)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Fatal("the cause must stay wrapped so errors.Is/As keep working")
 	}
 }
