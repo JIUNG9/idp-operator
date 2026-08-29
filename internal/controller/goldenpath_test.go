@@ -9,12 +9,16 @@ import (
 	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
 )
 
+// ptr is for the optional-with-default spec fields, where a pointer is what
+// keeps an explicit zero from being read as "unset".
+func ptr[T any](v T) *T { return &v }
+
 func valid() *idpv1alpha1.ServiceDeployment {
 	return &idpv1alpha1.ServiceDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders-api", Namespace: "idp-system"},
 		Spec: idpv1alpha1.ServiceDeploymentSpec{
 			Team:     "checkout",
-			Replicas: 3,
+			Replicas: ptr(int32(3)),
 			GitOps: idpv1alpha1.GitOps{
 				RepoURL: "https://github.com/acme-corp/orders-api-deploy",
 				Path:    "overlays/prod",
@@ -34,7 +38,8 @@ func TestValidate(t *testing.T) {
 		{"name too long", func(sd *idpv1alpha1.ServiceDeployment) { sd.Name = strings.Repeat("a", 64) }, "DNS-1123"},
 		{"reserved name", func(sd *idpv1alpha1.ServiceDeployment) { sd.Name = "kube-system" }, "reserved"},
 		{"missing team", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.Team = "" }, "spec.team"},
-		{"negative replicas", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.Replicas = -1 }, "negative"},
+		{"negative replicas", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.Replicas = ptr(int32(-1)) }, "negative"},
+		{"tier out of range", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.Tier = ptr(int32(9)) }, "spec.tier"},
 		{"missing repo", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.GitOps.RepoURL = "" }, "gitops"},
 		{"missing path", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.GitOps.Path = "" }, "gitops"},
 		{"availability not a number", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.SLO.AvailabilityTarget = "always" }, "percentage"},

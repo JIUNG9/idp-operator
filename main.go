@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -18,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
+	"github.com/JIUNG9/idp-operator/internal/budget"
 	"github.com/JIUNG9/idp-operator/internal/controller"
 )
 
@@ -33,6 +35,12 @@ func main() {
 		requireDigests    = flag.Bool("require-image-digests", false, "reject images referenced by tag; a verified tag can be moved afterwards, so this is what makes verification hold. Enable once your pipeline pins digests")
 		ingressNamespaces = flag.String("allow-ingress-from-namespaces", "", "comma-separated namespaces allowed to reach services, e.g. the ingress controller's")
 		ingressCIDRs      = flag.String("allow-ingress-from-cidrs", "", "comma-separated CIDRs allowed to reach services, for load balancers that target pod IPs directly")
+
+		prometheusURL  = flag.String("prometheus-url", "", "Prometheus base URL for error-budget readings. Empty means delivery is not budget-gated at all")
+		burnQuery      = flag.String("burn-query", "", "Go template for the instant query returning a service's error ratio; {{.Namespace}}, {{.Name}} and {{.Window}} are substituted. Defaults to an http_requests_total query")
+		burnTimeout    = flag.Duration("burn-query-timeout", 10*time.Second, "how long to wait for a burn reading before failing closed")
+		staticBudget   = flag.Float64("static-budget", -1, "fixed error budget fraction in [0,1] instead of querying Prometheus. For demos and testing only")
+		reevalInterval = flag.Duration("budget-reevaluation-interval", 5*time.Minute, "how stale a budget reading may get before it is taken again. Also paces the anti-flapping rule, which counts readings, not reconciles")
 	)
 	flag.Parse()
 
@@ -80,6 +88,29 @@ func main() {
 		}
 	}
 
+	// The burn source. Without one, nothing is budget-gated and the status
+	// says so on every service rather than implying a gate that isn't there.
+	var burnSource budget.Source
+	switch {
+	case *prometheusURL != "" && *staticBudget >= 0:
+		setupLog.Error(nil, "set either -prometheus-url or -static-budget, not both")
+		os.Exit(1)
+	case *prometheusURL != "":
+		src, err := budget.NewPrometheusSource(*prometheusURL, *burnQuery, *burnTimeout)
+		if err != nil {
+			setupLog.Error(err, "unable to build the burn source")
+			os.Exit(1)
+		}
+		burnSource = src
+	case *staticBudget >= 0:
+		setupLog.Info("using a STATIC error budget; delivery gating will not reflect real burn",
+			"budget", *staticBudget)
+		burnSource = budget.StaticSource{Value: *staticBudget}
+	default:
+		setupLog.Info("no burn source configured; delivery is not budget-gated " +
+			"(set -prometheus-url to enable it)")
+	}
+
 	scheme := clientgoscheme.Scheme
 	if err := idpv1alpha1.AddToScheme(scheme); err != nil {
 		setupLog.Error(err, "unable to register API types")
@@ -114,7 +145,9 @@ func main() {
 			AllowIngressFromNamespaces: splitList(*ingressNamespaces),
 			AllowIngressFromCIDRs:      splitList(*ingressCIDRs),
 		},
-		Policy: policyConfig,
+		Policy:               policyConfig,
+		BurnSource:           burnSource,
+		ReevaluationInterval: *reevalInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ServiceDeployment")
 		os.Exit(1)

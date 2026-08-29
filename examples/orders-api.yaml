@@ -10,6 +10,12 @@ metadata:
 spec:
   team: checkout
   replicas: 3
+  # Criticality, 0 the most critical. Decides how hard a depleted error
+  # budget stops automated delivery.
+  tier: 1
+  # Defaults to prod when unset — an unlabelled service is the one most
+  # likely to be mislabelled.
+  environment: prod
   slo:
     availabilityTarget: "99.95"
     latencyP99Ms: 250

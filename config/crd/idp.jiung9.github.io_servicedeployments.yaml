@@ -26,6 +26,9 @@ spec:
     - jsonPath: .spec.slo.availabilityTarget
       name: SLO
       type: string
+    - jsonPath: .status.budget.verdict
+      name: Budget
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -56,6 +59,17 @@ spec:
               ServiceDeploymentSpec is the single manifest a team writes to get a
               namespace, GitOps delivery, and an SLO baseline.
             properties:
+              environment:
+                default: prod
+                description: |-
+                  Environment decides whether a depleted budget merely warns or stops
+                  unattended delivery. Defaults to prod: an unlabelled service is the
+                  one most likely to be mislabelled.
+                enum:
+                - prod
+                - staging
+                - dev
+                type: string
               gitops:
                 description: GitOps points at the manifests ArgoCD should deliver
                   for this service.
@@ -82,6 +96,11 @@ spec:
                   Replicas the workload declares; drives the PDB baseline. 0 means
                   scaled to zero — the golden path provisions no PDB and says so in
                   a status condition instead of shipping a drain-blocking fake one.
+
+                  A pointer, because 0 is a meaningful value here: with a plain int and
+                  `omitempty`, a client setting 0 would serialise nothing, the API
+                  server would apply the default of 1, and the request would be
+                  silently inverted.
                 format: int32
                 minimum: 0
                 type: integer
@@ -109,6 +128,18 @@ spec:
                 description: Team owns the service; stamped on every provisioned object.
                 minLength: 1
                 type: string
+              tier:
+                default: 2
+                description: |-
+                  Tier is service criticality, 0 the most critical, matching
+                  error-budget-gate's tiers. It changes how hard a depleted error budget
+                  stops delivery. Pointer for the same reason as Replicas — and here it
+                  matters more, since tier 0 is the value you least want silently
+                  rewritten to the default.
+                format: int32
+                maximum: 3
+                minimum: 0
+                type: integer
             required:
             - gitops
             - team
@@ -119,6 +150,45 @@ spec:
               whether the objects exist and match spec — Provisioned does NOT claim the
               application is healthy; delivery health is ArgoCD's job.
             properties:
+              budget:
+                description: |-
+                  BudgetStatus is the delivery gate's memory. It is persisted rather than
+                  recomputed from scratch because the anti-flapping rule needs to know what
+                  the last verdict was, and because a verdict that resets every time the
+                  operator restarts is not a gate.
+                properties:
+                  environment:
+                    description: |-
+                      Environment and Tier record what the gate believed about the service
+                      when it decided. Both are self-service spec fields that weaken the
+                      verdict, so the decision carries them: a service relabelled to dev to
+                      win back automated delivery says so in its own status.
+                    type: string
+                  lastEvaluationTime:
+                    description: LastEvaluationTime is when the reading was taken.
+                    format: date-time
+                    type: string
+                  remainingPercent:
+                    description: RemainingPercent is the error budget left at the
+                      last reading.
+                    format: int32
+                    type: integer
+                  source:
+                    description: Source names where the reading came from.
+                    type: string
+                  streak:
+                    description: |-
+                      Streak counts consecutive readings arguing for a looser verdict than
+                      the one in force. Loosening waits; tightening never does.
+                    format: int32
+                    type: integer
+                  tier:
+                    format: int32
+                    type: integer
+                  verdict:
+                    description: Verdict is allow, require-human, or block.
+                    type: string
+                type: object
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
