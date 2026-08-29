@@ -1,11 +1,14 @@
 // idp-operator: one ServiceDeployment manifest provisions the golden path —
-// namespace, SLO baseline, disruption budget, and ArgoCD delivery.
+// namespace, SLO baseline, disruption budget, policy, and ArgoCD delivery.
 package main
 
 import (
+	"flag"
 	"os"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -19,8 +22,63 @@ import (
 )
 
 func main() {
+	// Cluster-level configuration. The ingress topology and the signing
+	// identity are properties of the platform, so they are set once here
+	// rather than repeated in every team's ServiceDeployment.
+	var (
+		cosignKeyFile     = flag.String("cosign-key-file", "", "path to a PEM public key (typically a mounted Secret) that container images must be signed with")
+		cosignIssuer      = flag.String("cosign-issuer", "", "OIDC issuer for keyless (Fulcio) image verification")
+		cosignSubject     = flag.String("cosign-subject", "", "OIDC subject for keyless (Fulcio) image verification")
+		imageReferences   = flag.String("verify-image-references", "*", "comma-separated image globs that signature verification applies to")
+		requireDigests    = flag.Bool("require-image-digests", false, "reject images referenced by tag; a verified tag can be moved afterwards, so this is what makes verification hold. Enable once your pipeline pins digests")
+		ingressNamespaces = flag.String("allow-ingress-from-namespaces", "", "comma-separated namespaces allowed to reach services, e.g. the ingress controller's")
+		ingressCIDRs      = flag.String("allow-ingress-from-cidrs", "", "comma-separated CIDRs allowed to reach services, for load balancers that target pod IPs directly")
+	)
+	flag.Parse()
+
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 	setupLog := ctrl.Log.WithName("setup")
+
+	// Fail fast on a half-configured trust root. Every one of these would
+	// otherwise start cleanly and verify against the wrong thing, or against
+	// nothing at all, which is the failure you least want to discover from a
+	// running cluster.
+	switch {
+	case *cosignKeyFile != "" && (*cosignIssuer != "" || *cosignSubject != ""):
+		setupLog.Error(nil, "set either -cosign-key-file or -cosign-issuer with -cosign-subject, not both: "+
+			"a key and a keyless identity are two different trust roots")
+		os.Exit(1)
+	case (*cosignIssuer == "") != (*cosignSubject == ""):
+		setupLog.Error(nil, "keyless verification needs both -cosign-issuer and -cosign-subject; "+
+			"with only one, images would silently not be verified at all")
+		os.Exit(1)
+	}
+
+	policyConfig := controller.PolicyConfig{
+		CosignIssuer:        *cosignIssuer,
+		CosignSubject:       *cosignSubject,
+		ImageReferences:     splitList(*imageReferences),
+		RequireImageDigests: *requireDigests,
+	}
+	if *cosignKeyFile != "" {
+		// Read once at startup: rotating the key means restarting the
+		// operator, and that restart re-reconciles every service anyway.
+		key, err := os.ReadFile(*cosignKeyFile)
+		if err != nil {
+			setupLog.Error(err, "unable to read cosign key file", "path", *cosignKeyFile)
+			os.Exit(1)
+		}
+		policyConfig.CosignPublicKey = string(key)
+	}
+	if !policyConfig.ImageVerificationConfigured() {
+		setupLog.Info("no signing identity configured; image signatures will NOT be verified " +
+			"(set -cosign-key-file, or -cosign-issuer with -cosign-subject)")
+		if *requireDigests {
+			// The digest requirement lives inside the verification rule, so
+			// without a signing identity there is no rule to carry it.
+			setupLog.Info("-require-image-digests has no effect without a signing identity")
+		}
+	}
 
 	scheme := clientgoscheme.Scheme
 	if err := idpv1alpha1.AddToScheme(scheme); err != nil {
@@ -38,6 +96,7 @@ func main() {
 				&corev1.Namespace{}:             {Label: managed},
 				&corev1.ConfigMap{}:             {Label: managed},
 				&policyv1.PodDisruptionBudget{}: {Label: managed},
+				&networkingv1.NetworkPolicy{}:   {Label: managed},
 			},
 		},
 	})
@@ -51,6 +110,11 @@ func main() {
 	if err := (&controller.ServiceDeploymentReconciler{
 		Client: mgr.GetClient(),
 		Reader: mgr.GetAPIReader(),
+		Network: controller.NetworkConfig{
+			AllowIngressFromNamespaces: splitList(*ingressNamespaces),
+			AllowIngressFromCIDRs:      splitList(*ingressCIDRs),
+		},
+		Policy: policyConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ServiceDeployment")
 		os.Exit(1)
@@ -61,4 +125,14 @@ func main() {
 		setupLog.Error(err, "manager exited")
 		os.Exit(1)
 	}
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
