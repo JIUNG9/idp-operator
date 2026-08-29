@@ -1,0 +1,15 @@
+# The smallest thing that works: a team, and where its manifests live.
+#
+# Everything else is defaulted — 99.9% availability, 300ms p99, one replica,
+# production, tier 2. Writing nothing is not opting out of reliability; it is
+# accepting the defaults, and the status will tell you what they were.
+apiVersion: idp.jiung9.github.io/v1alpha1
+kind: ServiceDeployment
+metadata:
+  name: orders-api
+  namespace: idp-system
+spec:
+  team: checkout
+  gitops:
+    repoURL: https://github.com/acme-corp/orders-api-deploy
+    path: overlays/prod

@@ -1,0 +1,35 @@
+# A tier-0 production service, which is where the error-budget gate bites
+# hardest.
+#
+# With the operator pointed at Prometheus (-prometheus-url), this service's
+# ArgoCD sync policy follows its remaining error budget:
+#
+#   healthy budget          → automated sync; push to Git and it ships
+#   below 25%, tier 0, prod → block; automated sync removed, status says so
+#   budget exhausted        → block, in every environment
+#
+# Tightening is immediate. Relaxing waits for three agreeing readings, so a
+# single good sample mid-incident does not hand delivery back.
+#
+# Watch it with:
+#   kubectl get servicedeployment -A
+#   kubectl get servicedeployment payments-api -n idp-system -o jsonpath='{.status.budget}'
+apiVersion: idp.jiung9.github.io/v1alpha1
+kind: ServiceDeployment
+metadata:
+  name: payments-api
+  namespace: idp-system
+spec:
+  team: payments
+  replicas: 4
+  # 0 is the most critical class. It does not stop a healthy service from
+  # deploying itself — it decides how hard a depleted budget stops it.
+  tier: 0
+  environment: prod
+  slo:
+    availabilityTarget: "99.99"
+    latencyP99Ms: 150
+  gitops:
+    repoURL: https://github.com/acme-corp/payments-api-deploy
+    path: overlays/prod
+    targetRevision: main
