@@ -147,6 +147,11 @@ enforcement (a condition verifying the label exists on live workloads) is future
 - **Live workload verification** — a condition that checks the `app.kubernetes.io/name`
   label actually exists on running workloads, so a mislabeled repo fails loudly instead
   of leaving a PDB that selects nothing.
+- **Platform-enforced environment** — `spec.environment` weakens the budget verdict and
+  is self-service, so a team can relabel prod as dev to win back automated delivery
+  below the 25% line. Exhaustion still blocks everywhere and the gate records what it
+  believed, but an operator-side mapping (namespace or label to environment) would make
+  it enforcement rather than governance.
 - **Kyverno enforcement readback** — read the provisioned policy's own status back, so
   `AdmissionPolicyReady` reflects whether Kyverno accepted and is enforcing it, not just
   that the API server stored it. Today a broken Kyverno reads as green.

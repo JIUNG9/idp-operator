@@ -78,8 +78,13 @@ in milliseconds and reopen the gate the instant a budget blipped upward.
 
 **A burn source that cannot be read is not a healthy budget.** If Prometheus is
 down or the query returns nothing, the operator holds the last verdict it actually
-measured, or asks for a human if it has never measured one. It never reads silence
-as good news.
+measured — for a while. A Prometheus restart is not a reliability event, and turning
+every scrape blip into a delivery freeze teaches people to rip the gate out. But the
+hold is bounded at three re-evaluation intervals, because monitoring tends to fail
+alongside the things it monitors: an unbounded hold would keep delivery unattended
+through exactly the incident nobody can see. Past that, an unreadable budget tightens
+the gate to `require-human`. It never loosens one — a `block` that cannot be
+re-measured stays a `block`.
 
 ### How this relates to error-budget-gate
 
@@ -156,6 +161,13 @@ service, not what a compromised pod inside it can reach. Containment is
   *enforced* depends on Kyverno's admission webhook being alive, which is not
   verified here — a broken Kyverno admits privileged pods while
   `AdmissionPolicyReady` still reads true. The condition message says so.
+- **`spec.environment` is a declaration, not a security boundary.** A team that can
+  edit its own `ServiceDeployment` can relabel a production service as `dev` and win
+  back automated delivery in the 0–25% band. Two things bound it: an *exhausted*
+  budget blocks in every environment, and the gate records the environment and tier
+  it believed into `status.budget`, so the relabel is visible in the object's own
+  status rather than being invisible. Platform-enforced environments are on the
+  roadmap; today this is governance, not enforcement.
 - **Whether your metrics mean what the burn query assumes.** The default query
   counts `http_requests_total` with a `5..` status. If your services do not emit
   that, replace it with `-burn-query`; a query that matches nothing is treated as

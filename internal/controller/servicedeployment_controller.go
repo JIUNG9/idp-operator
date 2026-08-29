@@ -53,6 +53,20 @@ const (
 	// gate relaxes. Tightening never waits.
 	LooseningStreak int32 = 3
 
+	// StaleVerdictGraceMultiple bounds how long a verdict may stand on a
+	// reading the operator can no longer refresh, as a multiple of the
+	// re-evaluation interval.
+	//
+	// Holding the last verdict through a brief outage is right: a Prometheus
+	// restart is not a reliability event, and turning every scrape blip into
+	// a delivery freeze would teach people to rip the gate out. Holding it
+	// indefinitely is wrong for a reason that matters more: monitoring tends
+	// to fail *with* the things it monitors, so an unbounded hold keeps
+	// unattended delivery running exactly through the incident where nobody
+	// can see the budget. After the grace period, an unreadable budget is
+	// treated as what it is — no evidence — and the gate tightens.
+	StaleVerdictGraceMultiple = 3
+
 	// Phases. Provisioned means the golden-path objects exist and match
 	// spec — it deliberately does NOT claim the application is healthy;
 	// delivery health is ArgoCD's job.
@@ -102,6 +116,13 @@ func (r *ServiceDeploymentReconciler) reevalInterval() time.Duration {
 		return r.ReevaluationInterval
 	}
 	return BudgetReevaluationInterval
+}
+
+// staleVerdictGrace is how long a verdict may go on standing after the burn
+// source stopped answering. Past it, the verdict is no longer evidence of
+// anything and the gate tightens.
+func (r *ServiceDeploymentReconciler) staleVerdictGrace() time.Duration {
+	return StaleVerdictGraceMultiple * r.reevalInterval()
 }
 
 // reader returns the uncached reader, falling back to the client (tests use
@@ -477,7 +498,10 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 	// time makes "three consecutive readings" mean three points in time.
 	// It also keeps the operator from hammering Prometheus once per event.
 	if prev != nil && prev.Verdict != "" && prev.LastEvaluationTime != nil {
-		if age := time.Since(prev.LastEvaluationTime.Time); age < interval {
+		// A negative age means the stored timestamp is in the future — clock
+		// skew, or a hand-edited status. Either way it is not something to
+		// hold a verdict on, so fall through and take a fresh reading.
+		if age := time.Since(prev.LastEvaluationTime.Time); age >= 0 && age < interval {
 			c.requeue(interval - age)
 			held := budget.Verdict(prev.Verdict)
 			c.budgetCondition(held, fmt.Sprintf(
@@ -500,17 +524,36 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 		Window:             ErrorBudgetWindow,
 	})
 	if err != nil {
-		// Fail closed. A source that cannot be read is not evidence of a
-		// healthy budget, and treating it as one would hand out unattended
-		// production delivery on the strength of a broken query. Hold what
-		// was last decided; with nothing decided yet, ask for a human.
-		held := budget.RequireHuman
+		// Fail closed, with a bounded grace period. A source that cannot be
+		// read is not evidence of a healthy budget. The last verdict stands
+		// while it is still recent — a Prometheus restart is not a
+		// reliability event — but only until the grace period runs out,
+		// because monitoring fails alongside the things it monitors and an
+		// unbounded hold would keep delivery unattended through exactly the
+		// incident nobody can see.
+		held, expired := budget.RequireHuman, true
 		if prev != nil && prev.Verdict != "" {
 			held = budget.Verdict(prev.Verdict)
+			if t := prev.LastEvaluationTime; t != nil {
+				age := time.Since(t.Time)
+				expired = age < 0 || age > r.staleVerdictGrace()
+			}
+		}
+		if expired && budget.Severity(held) < budget.Severity(budget.RequireHuman) {
+			// Tighten to require-human, never loosen: a block that cannot be
+			// re-measured stays a block.
+			held = budget.RequireHuman
+		}
+
+		detail := fmt.Sprintf("holding %q", held)
+		if expired {
+			detail = fmt.Sprintf("no reading within %s, so tightening to %q", r.staleVerdictGrace(), held)
 		}
 		c.degrade(CondBudgetGateReady, "BurnSourceUnavailable", fmt.Sprintf(
-			"could not read the error budget from %s (%v); holding %q rather than assuming the budget is healthy",
-			r.BurnSource.Describe(), err, held))
+			"could not read the error budget from %s (%v); %s rather than assuming the budget is healthy",
+			r.BurnSource.Describe(), err, detail))
+		// Keep asking: the source coming back is the only thing that ends this.
+		c.requeue(interval)
 		return held, nil
 	}
 
@@ -527,6 +570,8 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 		RemainingPercent:   int32(math.Round(remaining * 100)),
 		Streak:             streak,
 		Source:             r.BurnSource.Describe(),
+		Environment:        sd.Spec.Environment,
+		Tier:               sd.Spec.TierOrDefault(),
 		LastEvaluationTime: &now,
 	}
 
