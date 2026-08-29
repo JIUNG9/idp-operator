@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
+	"github.com/JIUNG9/idp-operator/internal/budget"
 )
 
 const (
@@ -41,6 +44,15 @@ const (
 	// installed, so this is the only way back.
 	EnvironmentalRetryInterval = 5 * time.Minute
 
+	// BudgetReevaluationInterval is how often a budget-gated service is
+	// looked at again. A budget reading has a shelf life; nothing else in
+	// the watch set changes when a service starts burning.
+	BudgetReevaluationInterval = 5 * time.Minute
+
+	// LooseningStreak is how many consecutive readings must agree before the
+	// gate relaxes. Tightening never waits.
+	LooseningStreak int32 = 3
+
 	// Phases. Provisioned means the golden-path objects exist and match
 	// spec — it deliberately does NOT claim the application is healthy;
 	// delivery health is ArgoCD's job.
@@ -57,6 +69,7 @@ const (
 	CondNetworkPolicyReady   = "NetworkPolicyReady"
 	CondAdmissionPolicyReady = "AdmissionPolicyReady"
 	CondDeliveryReady        = "DeliveryReady"
+	CondBudgetGateReady      = "BudgetGateReady"
 )
 
 // ApplicationGVK identifies the ArgoCD Application resource; it is handled
@@ -76,6 +89,19 @@ type ServiceDeploymentReconciler struct {
 	// not of any single service.
 	Network NetworkConfig
 	Policy  PolicyConfig
+	// BurnSource reads how much error budget a service has left. Nil means
+	// delivery is not budget-gated at all.
+	BurnSource budget.Source
+	// ReevaluationInterval is how stale a budget reading may get before it
+	// is taken again. Zero means BudgetReevaluationInterval.
+	ReevaluationInterval time.Duration
+}
+
+func (r *ServiceDeploymentReconciler) reevalInterval() time.Duration {
+	if r.ReevaluationInterval > 0 {
+		return r.ReevaluationInterval
+	}
+	return BudgetReevaluationInterval
 }
 
 // reader returns the uncached reader, falling back to the client (tests use
@@ -92,10 +118,18 @@ func (r *ServiceDeploymentReconciler) reader() client.Reader {
 // service has no PDB and a cluster without Kyverno has no admission policy;
 // neither is a broken golden path, and neither should read as one.
 type components struct {
-	sd        *idpv1alpha1.ServiceDeployment
-	conds     []metav1.Condition
-	skipped   []string
-	retryable bool
+	sd           *idpv1alpha1.ServiceDeployment
+	conds        []metav1.Condition
+	skipped      []string
+	degraded     []string
+	requeueAfter time.Duration
+}
+
+// requeue asks for another look, keeping the soonest request.
+func (c *components) requeue(d time.Duration) {
+	if c.requeueAfter == 0 || d < c.requeueAfter {
+		c.requeueAfter = d
+	}
 }
 
 func (c *components) ready(condType, reason, message string) {
@@ -113,18 +147,38 @@ func (c *components) skip(condType, reason, message string) {
 // Unlike a spec-driven skip, nothing will tell us when that changes.
 func (c *components) skipEnvironmental(condType, reason, message string) {
 	c.skip(condType, reason, message)
-	c.retryable = true
+	c.requeue(EnvironmentalRetryInterval)
+}
+
+// degrade records something that was provisioned but is not fully operative
+// — the budget gate holding delivery back, say. Distinct from a skip, which
+// means nothing was provisioned at all, and worth distinguishing: "you have
+// no PDB" and "your error budget stopped your deploys" are not the same news.
+func (c *components) degrade(condType, reason, message string) {
+	c.conds = append(c.conds, newCondition(c.sd, condType, metav1.ConditionFalse, reason, message))
+	c.degraded = append(c.degraded, condType)
 }
 
 func (c *components) aggregate() metav1.Condition {
-	if len(c.skipped) == 0 {
+	var parts []string
+	if len(c.skipped) > 0 {
+		parts = append(parts, "not provisioned: "+strings.Join(c.skipped, ", "))
+	}
+	if len(c.degraded) > 0 {
+		parts = append(parts, "degraded: "+strings.Join(c.degraded, ", "))
+	}
+	if len(parts) == 0 {
 		return newCondition(c.sd, CondProvisioned, metav1.ConditionTrue,
 			"Reconciled", "golden path provisioned")
 	}
 	// Still True: everything this spec and this cluster allow was provisioned.
-	// The reason names what was not, so "degraded" is never silent.
-	return newCondition(c.sd, CondProvisioned, metav1.ConditionTrue, "ReconciledWithSkips",
-		"golden path provisioned; not provisioned: "+strings.Join(c.skipped, ", "))
+	// The reason names what was not, so degradation is never silent.
+	reason := "ReconciledWithSkips"
+	if len(c.degraded) > 0 {
+		reason = "Degraded"
+	}
+	return newCondition(c.sd, CondProvisioned, metav1.ConditionTrue, reason,
+		"golden path provisioned; "+strings.Join(parts, "; "))
 }
 
 func (c *components) all() []metav1.Condition {
@@ -175,6 +229,9 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// The golden path, in order. Each step records its own condition; the
 	// first failure stops the path, because everything after it would be
 	// provisioned into a namespace that may not exist.
+	// The gate's verdict decides the Application's sync policy, so it is
+	// evaluated before delivery is written.
+	verdict := budget.Allow
 	steps := []struct {
 		cond string
 		name string
@@ -185,7 +242,12 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		{CondPDBReady, "pdb", func() error { return r.reconcilePDB(ctx, &sd, labels, c) }},
 		{CondNetworkPolicyReady, "network policy", func() error { return r.reconcileNetworkPolicies(ctx, &sd, labels, c) }},
 		{CondAdmissionPolicyReady, "admission policy", func() error { return r.reconcileAdmissionPolicy(ctx, &sd, labels, c) }},
-		{CondDeliveryReady, "argocd application", func() error { return r.reconcileApplication(ctx, &sd, labels, c) }},
+		{CondBudgetGateReady, "budget gate", func() error {
+			v, err := r.reconcileBudgetGate(ctx, &sd, c)
+			verdict = v
+			return err
+		}},
+		{CondDeliveryReady, "argocd application", func() error { return r.reconcileApplication(ctx, &sd, labels, c, verdict) }},
 	}
 	for _, s := range steps {
 		if err := s.run(); err != nil {
@@ -196,11 +258,7 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	logger.Info("golden path reconciled", "service", sd.Name, "team", sd.Spec.Team,
 		"skipped", strings.Join(c.skipped, ","))
 
-	res := ctrl.Result{}
-	if c.retryable {
-		res.RequeueAfter = EnvironmentalRetryInterval
-	}
-	return res, r.setStatus(ctx, &sd, PhaseProvisioned, c.all()...)
+	return ctrl.Result{RequeueAfter: c.requeueAfter}, r.setStatus(ctx, &sd, PhaseProvisioned, c.all()...)
 }
 
 // applyManaged creates or updates an object the golden path owns.
@@ -283,12 +341,13 @@ func (r *ServiceDeploymentReconciler) reconcileSLOBaseline(ctx context.Context, 
 // two replicas a PDB cannot protect anything, so none is provisioned and the
 // condition says which case this is.
 func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
-	if !PDBWanted(sd.Spec.Replicas) {
+	replicas := sd.Spec.ReplicasOrDefault()
+	if !PDBWanted(replicas) {
 		stale := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: sd.Name, Namespace: sd.Name}}
 		if err := r.Delete(ctx, stale); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
-		reason, message := PDBSkipReason(sd.Spec.Replicas)
+		reason, message := PDBSkipReason(replicas)
 		c.skip(CondPDBReady, reason, message)
 		return nil
 	}
@@ -305,7 +364,7 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 	}); err != nil {
 		return err
 	}
-	c.ready(CondPDBReady, "Protected", fmt.Sprintf("maxUnavailable=1 across %d replicas", sd.Spec.Replicas))
+	c.ready(CondPDBReady, "Protected", fmt.Sprintf("maxUnavailable=1 across %d replicas", replicas))
 	return nil
 }
 
@@ -394,8 +453,140 @@ func (r *ServiceDeploymentReconciler) reconcileAdmissionPolicy(ctx context.Conte
 	return nil
 }
 
+// reconcileBudgetGate reads the service's error budget and decides whether
+// delivery may proceed unattended. Returns the verdict in force — which is
+// not always the verdict this reading argued for, because loosening waits.
+func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, c *components) (budget.Verdict, error) {
+	if r.BurnSource == nil {
+		// Flag-driven, like the signing identity: it cannot appear without a
+		// restart, so there is nothing to come back for.
+		c.skip(CondBudgetGateReady, "BurnSourceNotConfigured",
+			"no burn source configured on the operator; delivery is not budget-gated")
+		return budget.Allow, nil
+	}
+	interval := r.reevalInterval()
+	prev := sd.Status.Budget
+
+	// A verdict is only re-derived when its reading has gone stale.
+	//
+	// This is load-bearing, not an optimisation. Writing status triggers a
+	// watch event, which triggers another reconcile, so a reconcile-counting
+	// anti-flapping rule burns its whole streak in milliseconds and relaxes
+	// the gate almost the moment the budget looks better — the exact
+	// behaviour the rule exists to prevent. Tying re-evaluation to elapsed
+	// time makes "three consecutive readings" mean three points in time.
+	// It also keeps the operator from hammering Prometheus once per event.
+	if prev != nil && prev.Verdict != "" && prev.LastEvaluationTime != nil {
+		if age := time.Since(prev.LastEvaluationTime.Time); age < interval {
+			c.requeue(interval - age)
+			held := budget.Verdict(prev.Verdict)
+			c.budgetCondition(held, fmt.Sprintf(
+				"standing verdict %q from a reading %s ago (%d%% of the budget left, via %s)",
+				held, age.Round(time.Second), prev.RemainingPercent, prev.Source))
+			return held, nil
+		}
+	}
+	// Nothing else in the watch set changes when a service starts burning.
+	c.requeue(interval)
+	target, err := strconv.ParseFloat(sd.Spec.SLO.AvailabilityTarget, 64)
+	if err != nil {
+		return budget.Allow, fmt.Errorf("availability target %q: %w", sd.Spec.SLO.AvailabilityTarget, err)
+	}
+
+	remaining, err := r.BurnSource.Remaining(ctx, budget.Service{
+		Namespace:          sd.Name,
+		Name:               sd.Name,
+		AvailabilityTarget: target,
+		Window:             ErrorBudgetWindow,
+	})
+	if err != nil {
+		// Fail closed. A source that cannot be read is not evidence of a
+		// healthy budget, and treating it as one would hand out unattended
+		// production delivery on the strength of a broken query. Hold what
+		// was last decided; with nothing decided yet, ask for a human.
+		held := budget.RequireHuman
+		if prev != nil && prev.Verdict != "" {
+			held = budget.Verdict(prev.Verdict)
+		}
+		c.degrade(CondBudgetGateReady, "BurnSourceUnavailable", fmt.Sprintf(
+			"could not read the error budget from %s (%v); holding %q rather than assuming the budget is healthy",
+			r.BurnSource.Describe(), err, held))
+		return held, nil
+	}
+
+	decision := budget.Evaluate(budget.Input{
+		Tier:       sd.Spec.TierOrDefault(),
+		Production: budget.IsProduction(sd.Spec.Environment),
+		Remaining:  remaining,
+	})
+	inForce, streak := resolveVerdict(prev, decision.Verdict)
+
+	now := metav1.Now()
+	sd.Status.Budget = &idpv1alpha1.BudgetStatus{
+		Verdict:            string(inForce),
+		RemainingPercent:   int32(math.Round(remaining * 100)),
+		Streak:             streak,
+		Source:             r.BurnSource.Describe(),
+		LastEvaluationTime: &now,
+	}
+
+	// The message says what was read and where from, never that the budget
+	// is healthy: the reading is a moment, and the timestamp for it lives in
+	// status.budget where a machine can use it.
+	message := fmt.Sprintf("%s (read from %s)", decision.Reason, r.BurnSource.Describe())
+	if inForce != decision.Verdict {
+		message += fmt.Sprintf("; holding %q for another %d reading(s) before relaxing to %q",
+			inForce, LooseningStreak-streak, decision.Verdict)
+	}
+	c.budgetCondition(inForce, message)
+	return inForce, nil
+}
+
+// budgetCondition records the gate's state: ready while delivery is still
+// automatic, degraded once the budget has taken that away.
+func (c *components) budgetCondition(verdict budget.Verdict, message string) {
+	if verdict == budget.Allow {
+		c.ready(CondBudgetGateReady, "AutomatedDeliveryAllowed", message)
+		return
+	}
+	reason := "AutomatedDeliveryStopped"
+	if verdict == budget.Block {
+		reason = "ErrorBudgetExhausted"
+	}
+	c.degrade(CondBudgetGateReady, reason, message)
+}
+
+// resolveVerdict applies the anti-flapping rule: a tighter verdict takes
+// effect at once, a looser one only after LooseningStreak consecutive
+// readings agree. The streak lives in status, so an operator restart does
+// not hand a service back its automated sync for free.
+func resolveVerdict(prev *idpv1alpha1.BudgetStatus, raw budget.Verdict) (budget.Verdict, int32) {
+	if prev == nil || prev.Verdict == "" {
+		return raw, 0
+	}
+	current := budget.Verdict(prev.Verdict)
+	if budget.Severity(raw) >= budget.Severity(current) {
+		return raw, 0
+	}
+	if streak := prev.Streak + 1; streak < LooseningStreak {
+		return current, streak
+	}
+	return raw, 0
+}
+
+// syncPolicyFor turns a verdict into ArgoCD's delivery behaviour.
+func syncPolicyFor(v budget.Verdict) map[string]any {
+	if v == budget.Allow {
+		return map[string]any{"automated": map[string]any{"prune": true, "selfHeal": true}}
+	}
+	// Removing `automated` is the whole of ArgoCD's vocabulary here: a human
+	// must sync deliberately. require-human and block produce the same
+	// mechanism, and the status is what says which situation you are in.
+	return map[string]any{}
+}
+
 // reconcileApplication hands the service to ArgoCD.
-func (r *ServiceDeploymentReconciler) reconcileApplication(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
+func (r *ServiceDeploymentReconciler) reconcileApplication(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components, verdict budget.Verdict) error {
 	app := &unstructured.Unstructured{}
 	app.SetGroupVersionKind(ApplicationGVK)
 	app.SetName(sd.Name)
@@ -413,15 +604,17 @@ func (r *ServiceDeploymentReconciler) reconcileApplication(ctx context.Context, 
 				"server":    "https://kubernetes.default.svc",
 				"namespace": sd.Name,
 			},
-			"syncPolicy": map[string]any{
-				"automated": map[string]any{"prune": true, "selfHeal": true},
-			},
+			"syncPolicy": syncPolicyFor(verdict),
 		}, "spec")
 	}); err != nil {
 		return err
 	}
-	c.ready(CondDeliveryReady, "Provisioned",
-		fmt.Sprintf("argocd syncing %s (%s) from %s", sd.Spec.GitOps.Path, sd.Spec.GitOps.TargetRevision, sd.Spec.GitOps.RepoURL))
+	mode := "automated sync"
+	if verdict != budget.Allow {
+		mode = "manual sync (" + string(verdict) + ")"
+	}
+	c.ready(CondDeliveryReady, "Provisioned", fmt.Sprintf("argocd %s of %s (%s) from %s",
+		mode, sd.Spec.GitOps.Path, sd.Spec.GitOps.TargetRevision, sd.Spec.GitOps.RepoURL))
 	return nil
 }
 
@@ -530,6 +723,9 @@ func (r *ServiceDeploymentReconciler) setStatus(ctx context.Context, sd *idpv1al
 		}
 		latest.Status.Phase = phase
 		latest.Status.ObservedGeneration = observed
+		// Carry the gate's memory: on paths that did not evaluate it, sd
+		// still holds what was read from the API, so this preserves it.
+		latest.Status.Budget = sd.Status.Budget
 		for _, c := range conditions {
 			apimeta.SetStatusCondition(&latest.Status.Conditions, c)
 		}

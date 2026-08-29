@@ -44,14 +44,78 @@ type ServiceDeploymentSpec struct {
 	// Replicas the workload declares; drives the PDB baseline. 0 means
 	// scaled to zero — the golden path provisions no PDB and says so in
 	// a status condition instead of shipping a drain-blocking fake one.
+	//
+	// A pointer, because 0 is a meaningful value here: with a plain int and
+	// `omitempty`, a client setting 0 would serialise nothing, the API
+	// server would apply the default of 1, and the request would be
+	// silently inverted.
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
+	Replicas *int32 `json:"replicas,omitempty"`
+	// Tier is service criticality, 0 the most critical, matching
+	// error-budget-gate's tiers. It changes how hard a depleted error budget
+	// stops delivery. Pointer for the same reason as Replicas — and here it
+	// matters more, since tier 0 is the value you least want silently
+	// rewritten to the default.
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3
+	// +optional
+	Tier *int32 `json:"tier,omitempty"`
+	// Environment decides whether a depleted budget merely warns or stops
+	// unattended delivery. Defaults to prod: an unlabelled service is the
+	// one most likely to be mislabelled.
+	// +kubebuilder:default=prod
+	// +kubebuilder:validation:Enum=prod;staging;dev
+	// +optional
+	Environment string `json:"environment,omitempty"`
 	// +kubebuilder:default={}
 	// +optional
 	SLO    SLO    `json:"slo,omitempty"`
 	GitOps GitOps `json:"gitops"`
+}
+
+// Defaults mirroring the CRD schema, for clients that bypass API-server
+// defaulting (the fake client in tests, mostly).
+const (
+	DefaultReplicas int32 = 1
+	DefaultTier     int32 = 2
+)
+
+// ReplicasOrDefault returns the declared replica count.
+func (s ServiceDeploymentSpec) ReplicasOrDefault() int32 {
+	if s.Replicas == nil {
+		return DefaultReplicas
+	}
+	return *s.Replicas
+}
+
+// TierOrDefault returns the declared criticality tier.
+func (s ServiceDeploymentSpec) TierOrDefault() int32 {
+	if s.Tier == nil {
+		return DefaultTier
+	}
+	return *s.Tier
+}
+
+// BudgetStatus is the delivery gate's memory. It is persisted rather than
+// recomputed from scratch because the anti-flapping rule needs to know what
+// the last verdict was, and because a verdict that resets every time the
+// operator restarts is not a gate.
+type BudgetStatus struct {
+	// Verdict is allow, require-human, or block.
+	Verdict string `json:"verdict,omitempty"`
+	// RemainingPercent is the error budget left at the last reading.
+	RemainingPercent int32 `json:"remainingPercent,omitempty"`
+	// Streak counts consecutive readings arguing for a looser verdict than
+	// the one in force. Loosening waits; tightening never does.
+	Streak int32 `json:"streak,omitempty"`
+	// Source names where the reading came from.
+	Source string `json:"source,omitempty"`
+	// LastEvaluationTime is when the reading was taken.
+	// +optional
+	LastEvaluationTime *metav1.Time `json:"lastEvaluationTime,omitempty"`
 }
 
 // ServiceDeploymentStatus reports what the golden path did. Phase says
@@ -61,6 +125,8 @@ type ServiceDeploymentStatus struct {
 	// Phase is one of Provisioned, Invalid, Error, Deleting.
 	Phase              string `json:"phase,omitempty"`
 	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	// +optional
+	Budget *BudgetStatus `json:"budget,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -75,6 +141,7 @@ type ServiceDeploymentStatus struct {
 // +kubebuilder:printcolumn:name="Team",type=string,JSONPath=`.spec.team`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="SLO",type=string,JSONPath=`.spec.slo.availabilityTarget`
+// +kubebuilder:printcolumn:name="Budget",type=string,JSONPath=`.status.budget.verdict`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type ServiceDeployment struct {
 	metav1.TypeMeta   `json:",inline"`

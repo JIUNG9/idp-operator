@@ -18,10 +18,12 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
+	"github.com/JIUNG9/idp-operator/internal/budget"
 )
 
 // TestEnvtestLifecycle is the create → verify → delete round-trip against a
@@ -104,8 +106,8 @@ func TestEnvtestLifecycle(t *testing.T) {
 	if created.Spec.SLO.AvailabilityTarget != "99.9" || created.Spec.SLO.LatencyP99Ms != 300 {
 		t.Fatalf("CRD schema did not default the SLO: %+v", created.Spec.SLO)
 	}
-	if created.Spec.Replicas != 1 || created.Spec.GitOps.TargetRevision != "HEAD" {
-		t.Fatalf("CRD schema defaults missing: replicas=%d gitops=%+v", created.Spec.Replicas, created.Spec.GitOps)
+	if created.Spec.ReplicasOrDefault() != 1 || created.Spec.GitOps.TargetRevision != "HEAD" {
+		t.Fatalf("CRD schema defaults missing: replicas=%d gitops=%+v", created.Spec.ReplicasOrDefault(), created.Spec.GitOps)
 	}
 
 	// ---- verify: provisioned, one replica → no PDB, condition explains ----
@@ -169,7 +171,7 @@ func TestEnvtestLifecycle(t *testing.T) {
 		if err := c.Get(ctx, key, &latest); err != nil {
 			return err
 		}
-		latest.Spec.Replicas = 3
+		latest.Spec.Replicas = ptr(int32(3))
 		return c.Update(ctx, &latest)
 	}); err != nil {
 		t.Fatal(err)
@@ -225,4 +227,156 @@ func eventually(t *testing.T, timeout time.Duration, f func() error) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("condition not met within %s: %v", timeout, last)
+}
+
+// TestEnvtestBudgetGate is M3's exit criterion against a real API server: an
+// exhausted budget takes automated sync away, the status explains it, and a
+// restarted operator does not hand it back on the first healthy reading.
+func TestEnvtestBudgetGate(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS not set — run via `make test`")
+	}
+
+	env := &envtest.Environment{
+		CRDDirectoryPaths:     []string{"../../config/crd", "../../test/crds"},
+		ErrorIfCRDPathMissing: true,
+	}
+	cfg, err := env.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = env.Stop() })
+
+	scheme := newScheme(t)
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"idp-system", ArgoCDNamespace} {
+		if err := c.Create(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// runOperator starts a manager with the given burn source and returns a
+	// stop function — one operator lifetime.
+	runOperator := func(source budget.Source, interval time.Duration) context.CancelFunc {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:  scheme,
+			Metrics: metricsserver.Options{BindAddress: "0"},
+			// Two managers run in this one test process to model a restart.
+			// Controller names are globally unique per process, which a real
+			// operator never trips over.
+			Controller: crconfig.Controller{SkipNameValidation: ptr(true)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &ServiceDeploymentReconciler{
+			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(),
+			BurnSource: source, ReevaluationInterval: interval,
+		}
+		if err := r.SetupWithManager(mgr); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _ = mgr.Start(ctx) }()
+		return cancel
+	}
+
+	ctx := context.Background()
+	sd := &idpv1alpha1.ServiceDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders-api", Namespace: "idp-system"},
+		Spec: idpv1alpha1.ServiceDeploymentSpec{
+			Team:   "checkout",
+			GitOps: idpv1alpha1.GitOps{RepoURL: "https://github.com/acme-corp/orders-api-deploy", Path: "overlays/prod"},
+		},
+	}
+	key := types.NamespacedName{Name: sd.Name, Namespace: sd.Namespace}
+
+	// ---- an exhausted budget stops unattended delivery ----
+	const reeval = 2 * time.Second
+	stop := runOperator(budget.StaticSource{Value: 0}, reeval)
+	if err := c.Create(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 30*time.Second, func() error {
+		var got idpv1alpha1.ServiceDeployment
+		if err := c.Get(ctx, key, &got); err != nil {
+			return err
+		}
+		if got.Status.Budget == nil || got.Status.Budget.Verdict != string(budget.Block) {
+			return fmt.Errorf("budget status = %+v", got.Status.Budget)
+		}
+		cond := apimeta.FindStatusCondition(got.Status.Conditions, CondBudgetGateReady)
+		if cond == nil || cond.Reason != "ErrorBudgetExhausted" {
+			return fmt.Errorf("condition = %+v", cond)
+		}
+		return nil
+	})
+	app := &unstructured.Unstructured{}
+	app.SetGroupVersionKind(ApplicationGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: "orders-api", Namespace: ArgoCDNamespace}, app); err != nil {
+		t.Fatalf("application: %v", err)
+	}
+	if _, found, _ := unstructured.NestedMap(app.Object, "spec", "syncPolicy", "automated"); found {
+		t.Fatal("an exhausted budget must remove automated sync from the real Application object")
+	}
+
+	// ---- restart the operator; the budget has recovered ----
+	stop()
+	stop = runOperator(budget.StaticSource{Value: 0.95}, reeval)
+	t.Cleanup(stop)
+
+	// Nudge the CR so the fresh operator reconciles it now rather than at
+	// its own re-evaluation interval.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest idpv1alpha1.ServiceDeployment
+		if err := c.Get(ctx, key, &latest); err != nil {
+			return err
+		}
+		latest.Annotations = map[string]string{"test.idp/nudge": "1"}
+		return c.Update(ctx, &latest)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A healthy reading lands almost at once. One is not enough: the streak
+	// lives in status, so a restart buys nobody a shortcut back to automated
+	// production delivery.
+	time.Sleep(reeval + time.Second)
+	var after idpv1alpha1.ServiceDeployment
+	if err := c.Get(ctx, key, &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Status.Budget.Verdict != string(budget.Block) {
+		t.Fatalf("a restart must not reset the gate: verdict = %q after %v", after.Status.Budget.Verdict, reeval+time.Second)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: "orders-api", Namespace: ArgoCDNamespace}, app); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := unstructured.NestedMap(app.Object, "spec", "syncPolicy", "automated"); found {
+		t.Fatal("one healthy reading after a restart must not restore automated sync")
+	}
+
+	// It does converge, though: enough agreeing readings and delivery goes
+	// back to being automatic without anyone touching it.
+	eventually(t, 60*time.Second, func() error {
+		var got idpv1alpha1.ServiceDeployment
+		if err := c.Get(ctx, key, &got); err != nil {
+			return err
+		}
+		if got.Status.Budget.Verdict != string(budget.Allow) {
+			return fmt.Errorf("verdict = %q, streak = %d", got.Status.Budget.Verdict, got.Status.Budget.Streak)
+		}
+		live := &unstructured.Unstructured{}
+		live.SetGroupVersionKind(ApplicationGVK)
+		if err := c.Get(ctx, types.NamespacedName{Name: "orders-api", Namespace: ArgoCDNamespace}, live); err != nil {
+			return err
+		}
+		if _, found, _ := unstructured.NestedMap(live.Object, "spec", "syncPolicy", "automated"); !found {
+			return fmt.Errorf("automated sync not restored")
+		}
+		return nil
+	})
 }
