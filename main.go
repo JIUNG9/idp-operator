@@ -30,6 +30,7 @@ func main() {
 		cosignIssuer      = flag.String("cosign-issuer", "", "OIDC issuer for keyless (Fulcio) image verification")
 		cosignSubject     = flag.String("cosign-subject", "", "OIDC subject for keyless (Fulcio) image verification")
 		imageReferences   = flag.String("verify-image-references", "*", "comma-separated image globs that signature verification applies to")
+		requireDigests    = flag.Bool("require-image-digests", false, "reject images referenced by tag; a verified tag can be moved afterwards, so this is what makes verification hold. Enable once your pipeline pins digests")
 		ingressNamespaces = flag.String("allow-ingress-from-namespaces", "", "comma-separated namespaces allowed to reach services, e.g. the ingress controller's")
 		ingressCIDRs      = flag.String("allow-ingress-from-cidrs", "", "comma-separated CIDRs allowed to reach services, for load balancers that target pod IPs directly")
 	)
@@ -39,9 +40,10 @@ func main() {
 	setupLog := ctrl.Log.WithName("setup")
 
 	policyConfig := controller.PolicyConfig{
-		CosignIssuer:    *cosignIssuer,
-		CosignSubject:   *cosignSubject,
-		ImageReferences: splitList(*imageReferences),
+		CosignIssuer:        *cosignIssuer,
+		CosignSubject:       *cosignSubject,
+		ImageReferences:     splitList(*imageReferences),
+		RequireImageDigests: *requireDigests,
 	}
 	if *cosignKeyFile != "" {
 		// Read once at startup: rotating the key means restarting the

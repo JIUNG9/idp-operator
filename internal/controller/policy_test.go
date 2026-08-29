@@ -187,3 +187,16 @@ func TestImageReferencesDefaultToEverything(t *testing.T) {
 		t.Fatalf("refs = %v", refs)
 	}
 }
+
+func TestRequireImageDigestsClosesTheMovedTagGap(t *testing.T) {
+	cfg := PolicyConfig{CosignPublicKey: "-----BEGIN PUBLIC KEY-----", RequireImageDigests: true}
+	spec := KyvernoPolicySpec(cfg)
+	verify := spec["rules"].([]any)[2].(map[string]any)["verifyImages"].([]any)[0].(map[string]any)
+	if verify["verifyDigest"] != true {
+		t.Fatal("opting in must require digests; verifying a tag that can move afterwards is not verification")
+	}
+	// Even then, the operator must not rewrite the reference itself.
+	if verify["mutateDigest"] != false {
+		t.Fatal("mutateDigest stays false regardless — it is what fights ArgoCD selfHeal")
+	}
+}

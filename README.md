@@ -65,23 +65,46 @@ operator flags, not spec fields:
 | `-cosign-key-file` | PEM public key, usually a mounted Secret, that images must be signed with |
 | `-cosign-issuer` / `-cosign-subject` | Keyless (Fulcio) verification instead of a key |
 | `-verify-image-references` | Image globs verification applies to (default `*`) |
+| `-require-image-digests` | Reject images referenced by tag. Off by default; see below |
 
 Without a signing identity the workload rules still ship and the status condition
 says plainly that signatures are **not** verified.
 
 ### Two decisions worth knowing about
 
-**Ingress is denied by default; egress is not.** An egress default-deny is only
-useful once a service can declare what it talks to, and that declaration doesn't
-exist yet — shipping one now would just be an outage with a policy attached. It's
-on the roadmap as `allowEgressTo`.
-
 **Image verification never rewrites the image.** Kyverno's `verifyImages` defaults
 to `mutateDigest: true`, replacing the tag with the verified digest at admission.
 Every service here also gets an ArgoCD Application with `selfHeal` on, so that
 rewrite becomes a standing fight: Kyverno mutates, ArgoCD sees drift from Git and
 puts the tag back, Kyverno mutates again. This operator verifies the signature and
-leaves the reference alone. Pin digests in the pipeline that builds your manifests.
+leaves the reference alone.
+
+That has a cost, and it should be stated plainly: verifying a tag is a check with
+a shelf life. The tag can be moved to an unsigned image after admission, or before
+the kubelet pulls it, and what runs is not what was verified. Closing that gap
+means the workload must name a digest — which is why `-require-image-digests`
+exists, and why the digest has to come from the pipeline that builds your
+manifests rather than from admission. It is off by default because turning it on
+rejects every tag-based manifest in the cluster.
+
+**Ingress is denied by default; egress is not.** An egress default-deny is only
+useful once a service can declare what it talks to, and that declaration doesn't
+exist yet — shipping one now would be an outage with a policy attached. So be
+clear about what this baseline does and doesn't do: it limits who can reach a
+service, not what a compromised pod inside it can reach. Containment is
+`allowEgressTo` on the roadmap, not something you have today.
+
+## What this operator does not check
+
+- **Kyverno's health.** The operator confirms the cluster knows what a Kyverno
+  Policy is, writes one, and reports that it was accepted. Whether it is
+  *enforced* depends on Kyverno's admission webhook being alive, which is not
+  verified here — a broken Kyverno admits privileged pods while
+  `AdmissionPolicyReady` still reads true. The condition message says so.
+- **Objects named `idp-*` in a provisioned namespace are the operator's.** It
+  will take over and overwrite one that already exists, including one the cache
+  could not see. That is deliberate for guardrails, and worth knowing before you
+  name something `idp-` yourself.
 
 ## The label contract
 

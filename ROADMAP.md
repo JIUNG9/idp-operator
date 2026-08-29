@@ -138,6 +138,9 @@ enforcement (a condition verifying the label exists on live workloads) is future
 - **Live workload verification** — a condition that checks the `app.kubernetes.io/name`
   label actually exists on running workloads, so a mislabeled repo fails loudly instead
   of leaving a PDB that selects nothing.
+- **Kyverno enforcement readback** — read the provisioned policy's own status back, so
+  `AdmissionPolicyReady` reflects whether Kyverno accepted and is enforcing it, not just
+  that the API server stored it. Today a broken Kyverno reads as green.
 
 ## Non-goals (for now)
 
