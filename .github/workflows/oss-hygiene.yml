@@ -1,0 +1,147 @@
+name: OSS Hygiene
+
+# Enforces the OSS production-ready rule: idp-operator must be deployable by any
+# engineer at any company with no code changes, only config. This workflow
+# catches hardcoded company-specific values (employer names, personal emails,
+# real AWS account IDs) before they can reach main.
+#
+# Scope exclusions:
+#   - docs/       — design docs sometimes describe the author's deployment
+#                   context explicitly
+#
+# This repo has no articles/ or memory/ directories. Their exclusions are kept
+# anyway so the workflow stays a drop-in copy of the shared template.
+#
+# The rule is documented in docs/OSS_HYGIENE.md. Update the grep term list
+# below AND the doc in lockstep.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  hygiene:
+    name: Check for hardcoded company-specific values
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check for employer names in source code
+        run: |
+          set -e
+          echo "Scanning for employer names outside docs/articles..."
+          # The employer list. Update when the author changes employer.
+          # Each new job → add the old + new name here AND to docs/OSS_HYGIENE.md.
+          EMPLOYER_PATTERNS='placen|naver|coupang|lotte|hyundai'
+          MATCHES=$(
+            grep -rEil "${EMPLOYER_PATTERNS}" \
+              --include='*.py' \
+              --include='*.go' \
+              --include='*.ts' --include='*.tsx' \
+              --include='*.js' --include='*.jsx' \
+              --include='*.json' \
+              --include='*.yaml' --include='*.yml' \
+              --include='*.sh' \
+              --include='*.toml' \
+              --exclude-dir='node_modules' \
+              --exclude-dir='.git' \
+              --exclude-dir='articles' \
+              --exclude-dir='docs' \
+              --exclude-dir='memory' \
+              --exclude-dir='.claude' \
+              --exclude='oss-hygiene.yml' \
+              . || true
+          )
+          if [ -n "$MATCHES" ]; then
+            echo "::error::OSS hygiene violation — employer-specific names found in source/config:"
+            echo "$MATCHES"
+            echo ""
+            echo "This operator must be deployable by any company. Replace hardcoded company names with"
+            echo "generic placeholders (acme-corp, customer-xyz) and move company-specific values"
+            echo "to custom_patterns config or env vars. See docs/OSS_HYGIENE.md for the playbook."
+            exit 1
+          fi
+          echo "OK — no employer names in source/config."
+
+      - name: Check for personal emails in source code
+        run: |
+          set -e
+          echo "Scanning for the author's personal email in code..."
+          EMAIL_PATTERNS='jiung\.gu@|@placen\.co\.kr|@naver\.com|@coupang\.com'
+          MATCHES=$(
+            grep -rEil "${EMAIL_PATTERNS}" \
+              --include='*.py' \
+              --include='*.go' \
+              --include='*.ts' --include='*.tsx' \
+              --include='*.js' --include='*.jsx' \
+              --include='*.toml' \
+              --exclude-dir='node_modules' \
+              --exclude-dir='.git' \
+              --exclude-dir='articles' \
+              --exclude-dir='docs' \
+              --exclude-dir='memory' \
+              --exclude='oss-hygiene.yml' \
+              . || true
+          )
+          if [ -n "$MATCHES" ]; then
+            echo "::error::OSS hygiene violation — personal email found in source:"
+            echo "$MATCHES"
+            echo ""
+            echo "Default config emails must be generic (idp-bot@localhost). Personal emails"
+            echo "only belong in articles/ (author byline) or commit metadata."
+            exit 1
+          fi
+          echo "OK — no personal emails in source."
+
+      - name: Check for real-looking AWS account IDs
+        run: |
+          set -e
+          echo "Scanning for AWS account IDs that are not the documentation placeholders..."
+          # Documentation-reserved placeholders that are always allowed:
+          #   123456789012    (AWS docs canonical)
+          #   111122223333    (AWS docs secondary)
+          #   987654321098    (AWS docs tertiary)
+          #   000000000000    (LocalStack default)
+          CODE_FILES=$(
+            find . -type f \
+              \( -name '*.py' -o -name '*.go' -o -name '*.ts' -o -name '*.tsx' \
+                 -o -name '*.json' -o -name '*.yaml' -o -name '*.yml' \
+                 -o -name '*.tf' -o -name '*.tfvars' \) \
+              -not -path './node_modules/*' \
+              -not -path './.git/*' \
+              -not -path './articles/*' \
+              -not -path './docs/*' \
+              -not -path './memory/*'
+          )
+          VIOLATIONS=""
+          for f in $CODE_FILES; do
+            # Find 12-digit numbers that are NOT the approved placeholders
+            UNKNOWN=$(
+              grep -oE '\b[0-9]{12}\b' "$f" 2>/dev/null \
+                | grep -vE '^(123456789012|111122223333|222233334444|333344445555|444455556666|555566667777|666677778888|777788889999|888899990000|987654321098|000000000000)$' \
+                || true
+            )
+            if [ -n "$UNKNOWN" ]; then
+              VIOLATIONS="${VIOLATIONS}\n${f}:\n${UNKNOWN}\n"
+            fi
+          done
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::OSS hygiene violation — non-placeholder AWS account IDs found:"
+            echo -e "$VIOLATIONS"
+            echo ""
+            echo "Replace with a documentation-reserved placeholder (123456789012,"
+            echo "111122223333, 987654321098, or 000000000000). If the number is legitimately"
+            echo "not an AWS account (e.g. a 12-digit unrelated id), add a comment making"
+            echo "that explicit so the next scan doesn't re-flag it."
+            exit 1
+          fi
+          echo "OK — only documentation-reserved AWS account IDs present."
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "::notice::OSS hygiene passed. This repo is deployable by any engineer"
+          echo "::notice::at any company with config-only changes."

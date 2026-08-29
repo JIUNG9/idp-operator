@@ -119,18 +119,29 @@ exact behaviour the rule exists to prevent. Unit tests could never show it: they
 `Reconcile` by hand, so the loop never runs. Re-evaluation is now paced by elapsed
 time, which also stops the operator querying Prometheus once per event.
 
-## M4 — ship
+## M4 — ship 🚧
 
-- [ ] kind-based e2e: the README quickstart executed verbatim by a script, asserting
-      the full golden path — including a correctly-labeled workload proving the label
-      contract below (used as CI's e2e job and as the demo)
-- [ ] CI workflow: build, vet, test, generated-output-in-sync check (+ e2e on label),
-      coverage badge
-- [ ] README quickstart verified verbatim on a clean machine; demo GIF
-- [ ] Example gallery: minimal, full-spec, and budget-gated `ServiceDeployment`s
+- [x] Dockerfile: distroless, non-root, static binary
+- [x] kind-based e2e (`test/e2e/e2e.sh`) — the README quickstart executed, and the
+      only place that proves what envtest cannot: that the Kyverno baseline actually
+      **rejects** a privileged pod, and that the PDB really selects a correctly
+      labelled workload. Also asserts an ordinary pod is still admitted, because a
+      baseline that fails every normal manifest gets switched off.
+- [x] CI: build, vet, gofmt, generated-output-in-sync, unit + envtest; e2e on demand
+      (PR label `e2e` or manual dispatch, since it builds an image and stands up a
+      cluster)
+- [x] OSS hygiene workflow + `docs/OSS_HYGIENE.md`, from the shared template
+- [x] Example gallery: minimal, full-spec, budget-gated
+- [ ] **The e2e has never been executed.** It is written and statically checked
+      (`bash -n`, YAML parsed, manifests validated offline), but running it means
+      creating a cluster and applying manifests, which needs an explicit go-ahead.
+      Until it has run green, treat it as unverified — the whole point of this repo
+      is not claiming things that have not been demonstrated.
+- [ ] Demo GIF
 - [ ] Final review of history and tree for anything non-public, then flip to public
 
-**Exit:** public repo, CI green on the first public commit.
+**Exit:** public repo, CI green on the first public commit. **Not met yet** — by
+definition it cannot be, until the repo is pushed.
 
 ## The label contract
 
