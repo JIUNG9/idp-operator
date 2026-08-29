@@ -25,8 +25,12 @@ import (
 )
 
 // TestEnvtestLifecycle is the create → verify → delete round-trip against a
-// real API server: CRD schema defaulting, resourceVersion conflicts, and
-// deletion timestamps — everything the fake client fakes away.
+// real API server: CRD schema defaulting, status subresource semantics, real
+// finalizer and deletion-timestamp handling, and objects a real validator has
+// accepted — things the fake client approximates or skips.
+//
+// The conflict-retry paths are covered deterministically by
+// TestSetStatusRetriesOnConflict rather than by racing this test.
 func TestEnvtestLifecycle(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS not set — run via `make test`")
