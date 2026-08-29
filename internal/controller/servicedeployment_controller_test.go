@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -33,11 +35,41 @@ func newScheme(t *testing.T) *runtime.Scheme {
 
 func newFixture(t *testing.T, sd *idpv1alpha1.ServiceDeployment, extra ...client.Object) (client.Client, *ServiceDeploymentReconciler, ctrl.Request) {
 	t.Helper()
+	return newFixtureOpts(t, sd, nil, nil, extra...)
+}
+
+// newFixtureOpts builds a fixture with control over what the cluster knows
+// (mapper) and how the operator is configured (tune).
+func newFixtureOpts(t *testing.T, sd *idpv1alpha1.ServiceDeployment, mapper apimeta.RESTMapper, tune func(*ServiceDeploymentReconciler), extra ...client.Object) (client.Client, *ServiceDeploymentReconciler, ctrl.Request) {
+	t.Helper()
 	objs := append([]client.Object{sd}, extra...)
-	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).WithStatusSubresource(sd).Build()
+	b := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).WithStatusSubresource(sd)
+	if mapper != nil {
+		b = b.WithRESTMapper(mapper)
+	}
+	c := b.Build()
 	r := &ServiceDeploymentReconciler{Client: c}
+	if tune != nil {
+		tune(r)
+	}
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sd.Name, Namespace: sd.Namespace}}
 	return c, r, req
+}
+
+// kyvernoMapper simulates a cluster with Kyverno's CRDs installed.
+func kyvernoMapper() apimeta.RESTMapper {
+	m := apimeta.NewDefaultRESTMapper([]schema.GroupVersion{KyvernoPolicyGVK.GroupVersion()})
+	m.Add(KyvernoPolicyGVK, apimeta.RESTScopeNamespace)
+	return m
+}
+
+func getNetworkPolicy(t *testing.T, c client.Client, name string) *networkingv1.NetworkPolicy {
+	t.Helper()
+	var np networkingv1.NetworkPolicy
+	if err := c.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "orders-api"}, &np); err != nil {
+		t.Fatalf("network policy %q: %v", name, err)
+	}
+	return &np
 }
 
 func getSD(t *testing.T, c client.Client, name, namespace string) *idpv1alpha1.ServiceDeployment {
@@ -272,5 +304,230 @@ func TestReconcileRefusesCollidingOwner(t *testing.T) {
 	}
 	if got := getSD(t, c, sd.Name, sd.Namespace); got.Status.Phase != PhaseError {
 		t.Fatalf("phase = %q, want %q", got.Status.Phase, PhaseError)
+	}
+}
+
+func TestReconcileProvisionsNetworkPolicies(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixture(t, sd)
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	deny := getNetworkPolicy(t, c, NetworkPolicyDenyIngress)
+	if len(deny.Spec.Ingress) != 0 || len(deny.Spec.PolicyTypes) != 1 {
+		t.Fatalf("deny policy wrong: %+v", deny.Spec)
+	}
+	if deny.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress {
+		t.Fatalf("egress must be left alone until dependencies can be declared, got %v", deny.Spec.PolicyTypes)
+	}
+	same := getNetworkPolicy(t, c, NetworkPolicyAllowSameNS)
+	if len(same.Spec.Ingress) != 1 {
+		t.Fatalf("same-namespace policy wrong: %+v", same.Spec)
+	}
+
+	// Nothing configured on the operator, so no platform policy exists.
+	var np networkingv1.NetworkPolicy
+	if err := c.Get(context.Background(), types.NamespacedName{Name: NetworkPolicyAllowPlatform, Namespace: "orders-api"}, &np); err == nil {
+		t.Fatal("platform ingress policy must not exist when nothing is configured")
+	}
+
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	cond := apimeta.FindStatusCondition(got.Status.Conditions, CondNetworkPolicyReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("NetworkPolicyReady wrong: %+v", cond)
+	}
+	// An exposed service with no configured ingress source is about to look
+	// broken; the condition has to say so rather than read as healthy.
+	if !strings.Contains(cond.Message, "no platform ingress sources are configured") {
+		t.Fatalf("condition must warn that nothing outside the namespace can reach the service: %q", cond.Message)
+	}
+}
+
+func TestReconcilePlatformIngressPolicy(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, nil, func(r *ServiceDeploymentReconciler) {
+		r.Network = NetworkConfig{
+			AllowIngressFromNamespaces: []string{"ingress-nginx"},
+			AllowIngressFromCIDRs:      []string{"10.0.0.0/16"},
+		}
+	})
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	platform := getNetworkPolicy(t, c, NetworkPolicyAllowPlatform)
+	if len(platform.Spec.Ingress[0].From) != 2 {
+		t.Fatalf("expected namespace + cidr peers, got %+v", platform.Spec.Ingress[0].From)
+	}
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	cond := apimeta.FindStatusCondition(got.Status.Conditions, CondNetworkPolicyReady)
+	if cond == nil || !strings.Contains(cond.Message, "ingress-nginx") {
+		t.Fatalf("condition should name the allowed sources: %+v", cond)
+	}
+}
+
+func TestReconcileRemovesStalePlatformPolicy(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, nil, func(r *ServiceDeploymentReconciler) {
+		r.Network = NetworkConfig{AllowIngressFromNamespaces: []string{"ingress-nginx"}}
+	})
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	getNetworkPolicy(t, c, NetworkPolicyAllowPlatform) // exists
+
+	// The platform team removed the configuration; the policy must go with it.
+	r.Network = NetworkConfig{}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	var np networkingv1.NetworkPolicy
+	if err := c.Get(ctx, types.NamespacedName{Name: NetworkPolicyAllowPlatform, Namespace: "orders-api"}, &np); err == nil {
+		t.Fatal("stale platform policy must be deleted when configuration is removed")
+	}
+}
+
+func TestReconcileSkipsAdmissionPolicyWithoutKyverno(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixture(t, sd) // no Kyverno in the RESTMapper
+
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("a cluster without Kyverno must not fail the golden path: %v", err)
+	}
+	// Nothing watches a CRD that has not been installed yet, so the only way
+	// back is to ask for one.
+	if res.RequeueAfter != EnvironmentalRetryInterval {
+		t.Fatalf("expected a requeue so Kyverno arriving later is noticed, got %v", res.RequeueAfter)
+	}
+
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	if got.Status.Phase != PhaseProvisioned {
+		t.Fatalf("phase = %q; a missing guardrail is degraded, not broken", got.Status.Phase)
+	}
+	cond := apimeta.FindStatusCondition(got.Status.Conditions, CondAdmissionPolicyReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "KyvernoNotInstalled" {
+		t.Fatalf("AdmissionPolicyReady wrong: %+v", cond)
+	}
+	agg := apimeta.FindStatusCondition(got.Status.Conditions, CondProvisioned)
+	if agg == nil || agg.Status != metav1.ConditionTrue || agg.Reason != "ReconciledWithSkips" {
+		t.Fatalf("aggregate wrong: %+v", agg)
+	}
+	if !strings.Contains(agg.Message, CondAdmissionPolicyReady) {
+		t.Fatalf("aggregate must name what was skipped: %q", agg.Message)
+	}
+}
+
+func TestReconcileProvisionsAdmissionPolicy(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, kyvernoMapper(), nil)
+
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("nothing environmental is missing; no requeue expected, got %v", res.RequeueAfter)
+	}
+
+	pol := &unstructured.Unstructured{}
+	pol.SetGroupVersionKind(KyvernoPolicyGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: KyvernoPolicyName, Namespace: "orders-api"}, pol); err != nil {
+		t.Fatalf("kyverno policy not created: %v", err)
+	}
+	rules, found, err := unstructured.NestedSlice(pol.Object, "spec", "rules")
+	if err != nil || !found || len(rules) != 2 {
+		t.Fatalf("expected the 2 workload rules without a signing identity, got %v (%v)", len(rules), err)
+	}
+	if pol.GetLabels()[LabelManagedBy] != ManagedByValue {
+		t.Fatalf("policy must carry the drift-watch labels: %v", pol.GetLabels())
+	}
+
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	cond := apimeta.FindStatusCondition(got.Status.Conditions, CondAdmissionPolicyReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("AdmissionPolicyReady wrong: %+v", cond)
+	}
+	// Silence here would read as "images are verified". They are not.
+	if !strings.Contains(cond.Message, "NOT verified") {
+		t.Fatalf("condition must admit signatures are unverified: %q", cond.Message)
+	}
+}
+
+func TestReconcileAdmissionPolicyVerifiesImagesWhenConfigured(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, kyvernoMapper(), func(r *ServiceDeploymentReconciler) {
+		r.Policy = PolicyConfig{CosignPublicKey: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----"}
+	})
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	pol := &unstructured.Unstructured{}
+	pol.SetGroupVersionKind(KyvernoPolicyGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: KyvernoPolicyName, Namespace: "orders-api"}, pol); err != nil {
+		t.Fatal(err)
+	}
+	rules, _, _ := unstructured.NestedSlice(pol.Object, "spec", "rules")
+	if len(rules) != 3 {
+		t.Fatalf("expected the verify rule to be added, got %d rules", len(rules))
+	}
+	verify := rules[2].(map[string]any)["verifyImages"].([]any)[0].(map[string]any)
+	if verify["mutateDigest"] != false {
+		t.Fatal("mutateDigest must survive the round-trip as false — otherwise Kyverno and ArgoCD selfHeal fight over the image")
+	}
+
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	cond := apimeta.FindStatusCondition(got.Status.Conditions, CondAdmissionPolicyReady)
+	if cond == nil || !strings.Contains(cond.Message, "verify-image-signatures") {
+		t.Fatalf("condition should enumerate the shipped rules: %+v", cond)
+	}
+	if strings.Contains(cond.Message, "NOT verified") {
+		t.Fatalf("verification is configured; condition must not claim otherwise: %q", cond.Message)
+	}
+}
+
+func TestReconcileReportsEveryComponent(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, kyvernoMapper(), nil)
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	for _, condType := range []string{
+		CondNamespaceReady, CondSLOReady, CondPDBReady,
+		CondNetworkPolicyReady, CondAdmissionPolicyReady, CondDeliveryReady, CondProvisioned,
+	} {
+		cond := apimeta.FindStatusCondition(got.Status.Conditions, condType)
+		if cond == nil {
+			t.Fatalf("%s condition missing", condType)
+		}
+		if cond.Message == "" {
+			t.Fatalf("%s has no message; a condition nobody can act on is noise", condType)
+		}
+	}
+}
+
+func TestReconcileFailureNamesTheBrokenComponent(t *testing.T) {
+	sd := valid()
+	foreign := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "orders-api"}}
+	c, r, req := newFixture(t, sd, foreign)
+
+	if _, err := r.Reconcile(context.Background(), req); err == nil {
+		t.Fatal("expected an error")
+	}
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	cond := apimeta.FindStatusCondition(got.Status.Conditions, CondNamespaceReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || !strings.Contains(cond.Message, "not managed") {
+		t.Fatalf("the failing component must carry the reason: %+v", cond)
+	}
+	// Steps after the failure never ran, so they must not claim readiness.
+	if apimeta.FindStatusCondition(got.Status.Conditions, CondDeliveryReady) != nil {
+		t.Fatal("a step that never ran must not report a condition")
 	}
 }

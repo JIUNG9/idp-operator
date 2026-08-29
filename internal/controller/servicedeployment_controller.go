@@ -3,8 +3,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -32,6 +35,12 @@ const (
 	// the argocd namespace. OwnerRefs are illegal across those boundaries.
 	Finalizer = "idp.jiung9.github.io/cleanup"
 
+	// EnvironmentalRetryInterval is how long the reconciler waits before
+	// looking again when the cluster could not yet provide something the
+	// golden path wants. Nothing in the watch set fires when a CRD is
+	// installed, so this is the only way back.
+	EnvironmentalRetryInterval = 5 * time.Minute
+
 	// Phases. Provisioned means the golden-path objects exist and match
 	// spec — it deliberately does NOT claim the application is healthy;
 	// delivery health is ArgoCD's job.
@@ -40,9 +49,14 @@ const (
 	PhaseError       = "Error"
 	PhaseDeleting    = "Deleting"
 
-	// Condition types.
-	CondProvisioned = "Provisioned"
-	CondPDBReady    = "PDBReady"
+	// Condition types. One per provisioned component, plus the aggregate.
+	CondProvisioned          = "Provisioned"
+	CondNamespaceReady       = "NamespaceReady"
+	CondSLOReady             = "SLOReady"
+	CondPDBReady             = "PDBReady"
+	CondNetworkPolicyReady   = "NetworkPolicyReady"
+	CondAdmissionPolicyReady = "AdmissionPolicyReady"
+	CondDeliveryReady        = "DeliveryReady"
 )
 
 // ApplicationGVK identifies the ArgoCD Application resource; it is handled
@@ -50,13 +64,18 @@ const (
 var ApplicationGVK = schema.GroupVersionKind{Group: "argoproj.io", Version: "v1alpha1", Kind: "Application"}
 
 // ServiceDeploymentReconciler provisions the golden path for one manifest:
-// namespace -> SLO baseline -> PDB -> ArgoCD Application.
+// namespace -> SLO baseline -> PDB -> policy -> ArgoCD Application.
 type ServiceDeploymentReconciler struct {
 	client.Client
 	// Reader, when set, is an uncached reader (mgr.GetAPIReader()). The
 	// namespace-ownership guard needs it because the manager cache is
 	// label-filtered to managed objects and would hide foreign namespaces.
 	Reader client.Reader
+	// Network and Policy are cluster-level configuration: the ingress
+	// topology and the signing identity are properties of the platform,
+	// not of any single service.
+	Network NetworkConfig
+	Policy  PolicyConfig
 }
 
 // reader returns the uncached reader, falling back to the client (tests use
@@ -68,12 +87,58 @@ func (r *ServiceDeploymentReconciler) reader() client.Reader {
 	return r.Client
 }
 
+// components records what each part of the golden path did, so the aggregate
+// condition can tell a deliberate skip from a failure. A single-replica
+// service has no PDB and a cluster without Kyverno has no admission policy;
+// neither is a broken golden path, and neither should read as one.
+type components struct {
+	sd        *idpv1alpha1.ServiceDeployment
+	conds     []metav1.Condition
+	skipped   []string
+	retryable bool
+}
+
+func (c *components) ready(condType, reason, message string) {
+	c.conds = append(c.conds, newCondition(c.sd, condType, metav1.ConditionTrue, reason, message))
+}
+
+// skip records something the spec asked us not to provision. A spec change
+// starts its own reconcile, so there is nothing to come back for.
+func (c *components) skip(condType, reason, message string) {
+	c.conds = append(c.conds, newCondition(c.sd, condType, metav1.ConditionFalse, reason, message))
+	c.skipped = append(c.skipped, condType)
+}
+
+// skipEnvironmental records something the cluster could not provide yet.
+// Unlike a spec-driven skip, nothing will tell us when that changes.
+func (c *components) skipEnvironmental(condType, reason, message string) {
+	c.skip(condType, reason, message)
+	c.retryable = true
+}
+
+func (c *components) aggregate() metav1.Condition {
+	if len(c.skipped) == 0 {
+		return newCondition(c.sd, CondProvisioned, metav1.ConditionTrue,
+			"Reconciled", "golden path provisioned")
+	}
+	// Still True: everything this spec and this cluster allow was provisioned.
+	// The reason names what was not, so "degraded" is never silent.
+	return newCondition(c.sd, CondProvisioned, metav1.ConditionTrue, "ReconciledWithSkips",
+		"golden path provisioned; not provisioned: "+strings.Join(c.skipped, ", "))
+}
+
+func (c *components) all() []metav1.Condition {
+	return append(c.conds, c.aggregate())
+}
+
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=kyverno.io,resources=policies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=argoproj.io,resources=applications,verbs=get;list;watch;create;update;patch;delete
 
 func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -105,25 +170,57 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	sd.Spec.SLO = ApplySLODefaults(sd.Spec.SLO)
 	sd.Spec.GitOps = ApplyGitOpsDefaults(sd.Spec.GitOps)
 	labels := Labels(&sd)
+	c := &components{sd: &sd}
 
-	// 1. Namespace — the service's home, stamped with ownership. Refuse to
-	// adopt one this operator doesn't own: without the guard, two
-	// ServiceDeployments with the same name in different namespaces would
-	// silently fight over one cluster namespace.
+	// The golden path, in order. Each step records its own condition; the
+	// first failure stops the path, because everything after it would be
+	// provisioned into a namespace that may not exist.
+	steps := []struct {
+		cond string
+		name string
+		run  func() error
+	}{
+		{CondNamespaceReady, "namespace", func() error { return r.reconcileNamespace(ctx, &sd, labels, c) }},
+		{CondSLOReady, "slo baseline", func() error { return r.reconcileSLOBaseline(ctx, &sd, labels, c) }},
+		{CondPDBReady, "pdb", func() error { return r.reconcilePDB(ctx, &sd, labels, c) }},
+		{CondNetworkPolicyReady, "network policy", func() error { return r.reconcileNetworkPolicies(ctx, &sd, labels, c) }},
+		{CondAdmissionPolicyReady, "admission policy", func() error { return r.reconcileAdmissionPolicy(ctx, &sd, labels, c) }},
+		{CondDeliveryReady, "argocd application", func() error { return r.reconcileApplication(ctx, &sd, labels, c) }},
+	}
+	for _, s := range steps {
+		if err := s.run(); err != nil {
+			return r.fail(ctx, &sd, c, s.cond, s.name, err)
+		}
+	}
+
+	logger.Info("golden path reconciled", "service", sd.Name, "team", sd.Spec.Team,
+		"skipped", strings.Join(c.skipped, ","))
+
+	res := ctrl.Result{}
+	if c.retryable {
+		res.RequeueAfter = EnvironmentalRetryInterval
+	}
+	return res, r.setStatus(ctx, &sd, PhaseProvisioned, c.all()...)
+}
+
+// reconcileNamespace creates the service's home, refusing to adopt a
+// namespace this operator didn't create or one another ServiceDeployment
+// already owns — without that guard, two ServiceDeployments of the same name
+// in different namespaces would silently fight over one cluster namespace.
+func (r *ServiceDeploymentReconciler) reconcileNamespace(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	var existing corev1.Namespace
 	switch err := r.reader().Get(ctx, types.NamespacedName{Name: sd.Name}, &existing); {
 	case err == nil:
 		if existing.Labels[LabelManagedBy] != ManagedByValue {
-			return r.fail(ctx, &sd, "namespace",
-				fmt.Errorf("namespace %q exists and is not managed by idp-operator", sd.Name))
+			return fmt.Errorf("namespace %q exists and is not managed by idp-operator", sd.Name)
 		}
 		if owner := existing.Labels[LabelOwnerNamespace]; owner != "" && owner != sd.Namespace {
-			return r.fail(ctx, &sd, "namespace",
-				fmt.Errorf("namespace %q is owned by a ServiceDeployment in %q", sd.Name, owner))
+			return fmt.Errorf("namespace %q is owned by a ServiceDeployment in %q", sd.Name, owner)
 		}
 	case !apierrors.IsNotFound(err):
-		return r.fail(ctx, &sd, "namespace", err)
+		return err
 	}
+
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: sd.Name}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
 		if ns.Labels == nil {
@@ -134,10 +231,14 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 		return nil
 	}); err != nil {
-		return r.fail(ctx, &sd, "namespace", err)
+		return err
 	}
+	c.ready(CondNamespaceReady, "Provisioned", fmt.Sprintf("namespace %q owned by team %q", sd.Name, sd.Spec.Team))
+	return nil
+}
 
-	// 2. SLO baseline — machine-readable reliability contract alerting reads.
+// reconcileSLOBaseline writes the reliability contract other tooling reads.
+func (r *ServiceDeploymentReconciler) reconcileSLOBaseline(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "slo-baseline", Namespace: sd.Name}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
 		cm.Labels = labels
@@ -148,38 +249,123 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 		return nil
 	}); err != nil {
-		return r.fail(ctx, &sd, "slo baseline", err)
+		return err
 	}
+	c.ready(CondSLOReady, "Provisioned", fmt.Sprintf("%s%% availability, %dms p99 over %s",
+		sd.Spec.SLO.AvailabilityTarget, sd.Spec.SLO.LatencyP99Ms, ErrorBudgetWindow))
+	return nil
+}
 
-	// 3. PDB — derived from declared replicas. Below two replicas a PDB
-	// can't protect anything, so provision none and say so, instead of
-	// shipping the classic drain-blocking minAvailable=1 footgun.
-	var pdbCond metav1.Condition
-	if PDBWanted(sd.Spec.Replicas) {
-		pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: sd.Name, Namespace: sd.Name}}
-		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
-			pdb.Labels = labels
-			maxUnavailable := intstr.FromInt32(1)
-			pdb.Spec = policyv1.PodDisruptionBudgetSpec{
-				MaxUnavailable: &maxUnavailable,
-				Selector:       &metav1.LabelSelector{MatchLabels: map[string]string{LabelName: sd.Name}},
-			}
-			return nil
-		}); err != nil {
-			return r.fail(ctx, &sd, "pdb", err)
-		}
-		pdbCond = newCondition(&sd, CondPDBReady, metav1.ConditionTrue, "Protected",
-			fmt.Sprintf("maxUnavailable=1 across %d replicas", sd.Spec.Replicas))
-	} else {
+// reconcilePDB derives disruption policy from the declared replicas. Below
+// two replicas a PDB cannot protect anything, so none is provisioned and the
+// condition says which case this is.
+func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
+	if !PDBWanted(sd.Spec.Replicas) {
 		stale := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: sd.Name, Namespace: sd.Name}}
 		if err := r.Delete(ctx, stale); err != nil && !apierrors.IsNotFound(err) {
-			return r.fail(ctx, &sd, "pdb", err)
+			return err
 		}
 		reason, message := PDBSkipReason(sd.Spec.Replicas)
-		pdbCond = newCondition(&sd, CondPDBReady, metav1.ConditionFalse, reason, message)
+		c.skip(CondPDBReady, reason, message)
+		return nil
 	}
 
-	// 4. ArgoCD Application — delivery is Git-to-production from day one.
+	pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: sd.Name, Namespace: sd.Name}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
+		pdb.Labels = labels
+		maxUnavailable := intstr.FromInt32(1)
+		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable: &maxUnavailable,
+			Selector:       &metav1.LabelSelector{MatchLabels: map[string]string{LabelName: sd.Name}},
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	c.ready(CondPDBReady, "Protected", fmt.Sprintf("maxUnavailable=1 across %d replicas", sd.Spec.Replicas))
+	return nil
+}
+
+// reconcileNetworkPolicies denies ingress by default and re-admits the two
+// sources that are always legitimate: the namespace itself, and whatever the
+// platform team declared as its ingress path.
+func (r *ServiceDeploymentReconciler) reconcileNetworkPolicies(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
+	apply := func(name string, spec networkingv1.NetworkPolicySpec) error {
+		np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sd.Name}}
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+			np.Labels = labels
+			np.Spec = spec
+			return nil
+		})
+		return err
+	}
+
+	if err := apply(NetworkPolicyDenyIngress, DenyIngressSpec()); err != nil {
+		return err
+	}
+	if err := apply(NetworkPolicyAllowSameNS, SameNamespaceIngressSpec()); err != nil {
+		return err
+	}
+
+	platform, configured := r.Network.PlatformIngressSpec()
+	if !configured {
+		// Drop a policy left over from an earlier configuration.
+		stale := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: NetworkPolicyAllowPlatform, Namespace: sd.Name}}
+		if err := r.Delete(ctx, stale); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		// Not a skip: the deny is in force and correct. It does mean nothing
+		// outside the namespace can reach this service, which is worth saying
+		// out loud, because for an externally exposed service it is an outage
+		// waiting to be reported as a bug.
+		c.ready(CondNetworkPolicyReady, "DefaultDenyIngress",
+			"ingress denied except from within the namespace; no platform ingress sources are configured on the operator")
+		return nil
+	}
+	if err := apply(NetworkPolicyAllowPlatform, platform); err != nil {
+		return err
+	}
+	sources := append(append([]string{}, r.Network.AllowIngressFromNamespaces...), r.Network.AllowIngressFromCIDRs...)
+	c.ready(CondNetworkPolicyReady, "DefaultDenyIngress",
+		"ingress denied except from within the namespace and "+strings.Join(sources, ", "))
+	return nil
+}
+
+// reconcileAdmissionPolicy installs the Kyverno baseline. Kyverno is not a
+// dependency of this operator: without it the rest of the golden path still
+// provisions and the condition says the guardrail is missing.
+func (r *ServiceDeploymentReconciler) reconcileAdmissionPolicy(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
+	if !r.kyvernoAvailable() {
+		// Kyverno's CRDs can be installed after this operator starts, and
+		// nothing in the watch set fires when they are — hence the requeue.
+		// (The signing identity needs no such treatment: it arrives as
+		// operator flags, and the restart carrying it reconciles everything.)
+		c.skipEnvironmental(CondAdmissionPolicyReady, "KyvernoNotInstalled",
+			"kyverno.io/v1 Policy is not registered in this cluster; no admission guardrails were installed")
+		return nil
+	}
+
+	pol := &unstructured.Unstructured{}
+	pol.SetGroupVersionKind(KyvernoPolicyGVK)
+	pol.SetName(KyvernoPolicyName)
+	pol.SetNamespace(sd.Name)
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, pol, func() error {
+		pol.SetLabels(labels)
+		return unstructured.SetNestedMap(pol.Object, KyvernoPolicySpec(r.Policy), "spec")
+	}); err != nil {
+		return err
+	}
+
+	message := "enforcing " + strings.Join(KyvernoRuleNames(r.Policy), ", ")
+	if !r.Policy.ImageVerificationConfigured() {
+		message += "; image signatures are NOT verified (no signing identity configured on the operator)"
+	}
+	c.ready(CondAdmissionPolicyReady, "Provisioned", message)
+	return nil
+}
+
+// reconcileApplication hands the service to ArgoCD.
+func (r *ServiceDeploymentReconciler) reconcileApplication(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	app := &unstructured.Unstructured{}
 	app.SetGroupVersionKind(ApplicationGVK)
 	app.SetName(sd.Name)
@@ -202,18 +388,26 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			},
 		}, "spec")
 	}); err != nil {
-		return r.fail(ctx, &sd, "argocd application", err)
+		return err
 	}
+	c.ready(CondDeliveryReady, "Provisioned",
+		fmt.Sprintf("argocd syncing %s (%s) from %s", sd.Spec.GitOps.Path, sd.Spec.GitOps.TargetRevision, sd.Spec.GitOps.RepoURL))
+	return nil
+}
 
-	logger.Info("golden path reconciled", "service", sd.Name, "team", sd.Spec.Team)
-	return ctrl.Result{}, r.setStatus(ctx, &sd, PhaseProvisioned,
-		newCondition(&sd, CondProvisioned, metav1.ConditionTrue, "Reconciled", "golden path provisioned"),
-		pdbCond)
+// kyvernoAvailable reports whether this cluster knows what a Kyverno Policy is.
+func (r *ServiceDeploymentReconciler) kyvernoAvailable() bool {
+	m := r.RESTMapper()
+	if m == nil {
+		return false
+	}
+	_, err := m.RESTMapping(KyvernoPolicyGVK.GroupKind(), KyvernoPolicyGVK.Version)
+	return err == nil
 }
 
 // finalize tears down what the golden path provisioned. Deletion order:
 // Application first (it lives outside the namespace cascade), then the
-// namespace, which cascades to the ConfigMap/PDB inside it. Every delete is
+// namespace, which cascades to everything inside it. Every delete is
 // idempotent — names are derived, never stored — so unwinding a partial
 // provision is safe. The namespace's actual termination is the API server's
 // job; this operator only requires deletion to be initiated.
@@ -273,12 +467,14 @@ func (r *ServiceDeploymentReconciler) finalize(ctx context.Context, sd *idpv1alp
 	return ctrl.Result{}, err
 }
 
-// fail records an Error status and returns the error so controller-runtime
-// requeues with backoff.
-func (r *ServiceDeploymentReconciler) fail(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, component string, err error) (ctrl.Result, error) {
+// fail records an Error status against the component that broke and returns
+// the error so controller-runtime requeues with backoff.
+func (r *ServiceDeploymentReconciler) fail(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, c *components, condType, component string, err error) (ctrl.Result, error) {
 	msg := fmt.Sprintf("%s: %v", component, err)
-	if serr := r.setStatus(ctx, sd, PhaseError,
-		newCondition(sd, CondProvisioned, metav1.ConditionFalse, PhaseError, msg)); serr != nil {
+	conds := append(c.conds,
+		newCondition(sd, condType, metav1.ConditionFalse, PhaseError, msg),
+		newCondition(sd, CondProvisioned, metav1.ConditionFalse, PhaseError, msg))
+	if serr := r.setStatus(ctx, sd, PhaseError, conds...); serr != nil {
 		return ctrl.Result{}, serr
 	}
 	return ctrl.Result{}, fmt.Errorf("%s", msg)
@@ -321,7 +517,7 @@ func newCondition(sd *idpv1alpha1.ServiceDeployment, condType string, status met
 // mapProvisioned routes drift on a provisioned object back to the owning
 // ServiceDeployment via the labels every provisioned object carries. This is
 // the watch path for children ownerReferences can't cover (the cluster-scoped
-// namespace, the cross-namespace ConfigMap/PDB/Application).
+// namespace, the cross-namespace ConfigMap/PDB/policies/Application).
 func mapProvisioned(_ context.Context, obj client.Object) []ctrl.Request {
 	l := obj.GetLabels()
 	if l[LabelManagedBy] != ManagedByValue {
@@ -340,19 +536,22 @@ func (r *ServiceDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&idpv1alpha1.ServiceDeployment{}).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
-		Watches(&policyv1.PodDisruptionBudget{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned))
+		Watches(&policyv1.PodDisruptionBudget{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
+		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned))
 
-	// The Application watch needs the ArgoCD CRD. On clusters without it,
-	// skip the watch (drift on Applications won't re-reconcile) instead of
-	// failing manager start; creating Applications will surface its own
-	// error in status until the CRD arrives.
-	if _, err := mgr.GetRESTMapper().RESTMapping(ApplicationGVK.GroupKind(), ApplicationGVK.Version); err == nil {
-		app := &unstructured.Unstructured{}
-		app.SetGroupVersionKind(ApplicationGVK)
-		b = b.Watches(app, handler.EnqueueRequestsFromMapFunc(mapProvisioned))
-	} else {
-		ctrl.Log.WithName("setup").Info(
-			"argoproj.io Application CRD not found; Application drift will not trigger reconciles")
+	// The Application and Kyverno watches need their CRDs. On clusters
+	// without them, skip the watch instead of failing manager start — drift
+	// on those objects won't re-reconcile, and the reconciler already
+	// reports the missing guardrail in status.
+	for _, gvk := range []schema.GroupVersionKind{ApplicationGVK, KyvernoPolicyGVK} {
+		if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			ctrl.Log.WithName("setup").Info(
+				"CRD not found; drift on this kind will not trigger reconciles", "kind", gvk.String())
+			continue
+		}
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(gvk)
+		b = b.Watches(u, handler.EnqueueRequestsFromMapFunc(mapProvisioned))
 	}
 	return b.Complete(r)
 }

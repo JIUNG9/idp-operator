@@ -42,22 +42,45 @@ that check through an uncached reader, because the manager cache is label-filter
 would otherwise hide a foreign namespace — during teardown that gap would have released
 the finalizer without deleting anything.
 
-## M2 — policy baseline
+## M2 — policy baseline ✅ (v0.3.0)
 
 Provisioning should hand out guardrails, not just resources.
 
-- [ ] NetworkPolicy default-deny (+ DNS egress allowance) per provisioned namespace
-- [ ] Kyverno policy baseline: signed-image verification (Cosign) and disallowed
-      privileged pods, installed as part of the golden path. Applied as unstructured
-      objects; if Kyverno isn't installed, `PolicyReady=False/KyvernoNotInstalled` and
-      everything else still provisions — degrade, don't crash.
-- [ ] Status conditions per provisioned component (`NamespaceReady`, `PolicyReady`, ...).
-      Precedence rule: component conditions are independent and all surfaced; the
-      aggregate condition is the AND of them, with the first failing component as its
-      reason. Nothing suppresses anything.
+- [x] NetworkPolicy default-deny **ingress** per provisioned namespace, re-admitting
+      the namespace itself and the platform's declared ingress sources
+      (`-allow-ingress-from-namespaces`, `-allow-ingress-from-cidrs`).
+      **Egress is deliberately untouched** — see the scope note below.
+- [x] Kyverno policy baseline: privileged pods and host namespaces rejected, plus
+      Cosign signature verification when a signing identity is configured. Applied as
+      unstructured objects, so no Kyverno Go dependency. If Kyverno isn't installed,
+      `AdmissionPolicyReady=False/KyvernoNotInstalled` and everything else still
+      provisions — degrade, don't crash — and the reconcile requeues, because nothing
+      in the watch set fires when a CRD is installed later.
+- [x] Status conditions per provisioned component (`NamespaceReady`, `SLOReady`,
+      `PDBReady`, `NetworkPolicyReady`, `AdmissionPolicyReady`, `DeliveryReady`).
+      Component conditions are independent and all surfaced; the aggregate
+      `Provisioned` condition distinguishes a **deliberate skip** from a **failure**.
+      A strict AND would have reported single-replica services as unprovisioned,
+      contradicting M1: a skip is a documented state, and the aggregate's reason names
+      every one of them so "degraded" is never silent.
 
-**Exit:** a fresh `ServiceDeployment` yields a namespace where an unsigned or
-privileged pod is rejected out of the box, and `.status.conditions` says why.
+**Exit:** a fresh `ServiceDeployment` yields a namespace carrying the deny-by-default
+ingress policies and a Kyverno baseline whose rules say what they enforce, with
+`.status.conditions` explaining anything absent. **Met.**
+
+**What this milestone does NOT prove:** envtest runs an API server with no admission
+webhooks, so it verifies the policies are provisioned and correct, not that they
+*reject* anything. Actual rejection of a privileged or unsigned pod is proven by the
+kind-based e2e in M4. Claiming otherwise on envtest evidence would be a lie.
+
+### Scope note: why ingress only
+
+An egress default-deny is only useful once a service can declare what it talks to.
+Without that declaration it is an outage with a policy attached, and it cannot be
+demonstrated in envtest either — proving it needs a real workload reaching a real
+dependency, which is M4's territory. The declaration (`spec.network.allowEgressTo`,
+turning declared dependencies into policy) is the natural follow-up and belongs in
+its own milestone, not smuggled into this one untested.
 
 ## M3 — budget-aware delivery (the point of the project)
 
@@ -107,6 +130,14 @@ by `app.kubernetes.io/name: <service-name>`. The operator never creates the work
 your GitOps repo does — so your manifests must carry that label. A mislabeled workload
 means a PDB that silently selects nothing. The e2e proves the contract end to end;
 enforcement (a condition verifying the label exists on live workloads) is future work.
+
+## Next after M4
+
+- **`spec.network.allowEgressTo`** — declared dependencies become egress policy, which
+  is what makes an egress default-deny safe to ship. Split out of M2 on purpose.
+- **Live workload verification** — a condition that checks the `app.kubernetes.io/name`
+  label actually exists on running workloads, so a mislabeled repo fails loudly instead
+  of leaving a PDB that selects nothing.
 
 ## Non-goals (for now)
 
