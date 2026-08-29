@@ -57,8 +57,11 @@ func Validate(sd *idpv1alpha1.ServiceDeployment) error {
 	if sd.Spec.Team == "" {
 		return fmt.Errorf("spec.team is required: every service needs an owner")
 	}
-	if sd.Spec.Replicas < 0 {
+	if sd.Spec.Replicas != nil && *sd.Spec.Replicas < 0 {
 		return fmt.Errorf("spec.replicas must not be negative")
+	}
+	if t := sd.Spec.Tier; t != nil && (*t < 0 || *t > 3) {
+		return fmt.Errorf("spec.tier %d must be between 0 (most critical) and 3", *t)
 	}
 	if sd.Spec.GitOps.RepoURL == "" || sd.Spec.GitOps.Path == "" {
 		return fmt.Errorf("spec.gitops.repoURL and spec.gitops.path are required")

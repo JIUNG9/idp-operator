@@ -166,7 +166,7 @@ func TestReconcileRejectsInvalidSpec(t *testing.T) {
 
 func TestReconcileSingleReplicaSkipsPDB(t *testing.T) {
 	sd := valid()
-	sd.Spec.Replicas = 1
+	sd.Spec.Replicas = ptr(int32(1))
 	c, r, req := newFixture(t, sd)
 
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
@@ -201,7 +201,7 @@ func TestReconcileScaleDownRemovesPDB(t *testing.T) {
 	}
 
 	fresh := getSD(t, c, sd.Name, sd.Namespace)
-	fresh.Spec.Replicas = 1
+	fresh.Spec.Replicas = ptr(int32(1))
 	if err := c.Update(ctx, fresh); err != nil {
 		t.Fatal(err)
 	}
