@@ -36,10 +36,11 @@ func main() {
 		ingressNamespaces = flag.String("allow-ingress-from-namespaces", "", "comma-separated namespaces allowed to reach services, e.g. the ingress controller's")
 		ingressCIDRs      = flag.String("allow-ingress-from-cidrs", "", "comma-separated CIDRs allowed to reach services, for load balancers that target pod IPs directly")
 
-		prometheusURL = flag.String("prometheus-url", "", "Prometheus base URL for error-budget readings. Empty means delivery is not budget-gated at all")
-		burnQuery     = flag.String("burn-query", "", "Go template for the instant query returning a service's error ratio; {{.Namespace}}, {{.Name}} and {{.Window}} are substituted. Defaults to an http_requests_total query")
-		burnTimeout   = flag.Duration("burn-query-timeout", 10*time.Second, "how long to wait for a burn reading before failing closed")
-		staticBudget  = flag.Float64("static-budget", -1, "fixed error budget fraction in [0,1] instead of querying Prometheus. For demos and testing only")
+		prometheusURL  = flag.String("prometheus-url", "", "Prometheus base URL for error-budget readings. Empty means delivery is not budget-gated at all")
+		burnQuery      = flag.String("burn-query", "", "Go template for the instant query returning a service's error ratio; {{.Namespace}}, {{.Name}} and {{.Window}} are substituted. Defaults to an http_requests_total query")
+		burnTimeout    = flag.Duration("burn-query-timeout", 10*time.Second, "how long to wait for a burn reading before failing closed")
+		staticBudget   = flag.Float64("static-budget", -1, "fixed error budget fraction in [0,1] instead of querying Prometheus. For demos and testing only")
+		reevalInterval = flag.Duration("budget-reevaluation-interval", 5*time.Minute, "how stale a budget reading may get before it is taken again. Also paces the anti-flapping rule, which counts readings, not reconciles")
 	)
 	flag.Parse()
 
@@ -144,8 +145,9 @@ func main() {
 			AllowIngressFromNamespaces: splitList(*ingressNamespaces),
 			AllowIngressFromCIDRs:      splitList(*ingressCIDRs),
 		},
-		Policy:     policyConfig,
-		BurnSource: burnSource,
+		Policy:               policyConfig,
+		BurnSource:           burnSource,
+		ReevaluationInterval: *reevalInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ServiceDeployment")
 		os.Exit(1)
