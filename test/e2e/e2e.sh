@@ -25,6 +25,21 @@ log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 fail() { printf '\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 ok()   { printf '\033[1;32m  ok: %s\033[0m\n' "$*"; }
 
+# retry_until <seconds> <expected> <command...> — poll until the command's
+# stdout equals <expected>. Several of the things asserted below are written by
+# other controllers after the fact, so a single read races them.
+retry_until() {
+  local timeout=$1 expected=$2; shift 2
+  local deadline=$(( SECONDS + timeout )) actual=""
+  while [ $SECONDS -lt $deadline ]; do
+    actual=$("$@" 2>/dev/null || true)
+    [ "$actual" = "$expected" ] && return 0
+    sleep 2
+  done
+  printf 'last value: %s\n' "${actual:-<empty>}" >&2
+  return 1
+}
+
 cleanup() {
   local code=$?
   if [ "$KEEP" = "1" ]; then
@@ -45,7 +60,13 @@ log "creating kind cluster ${CLUSTER}"
 kind create cluster --name "$CLUSTER" --wait 120s
 
 log "installing Kyverno ${KYVERNO_VERSION}"
-$KUBECTL apply -f "https://github.com/kyverno/kyverno/releases/download/${KYVERNO_VERSION}/install.yaml"
+# Server-side apply is required, not a preference. Kyverno's CRDs carry huge
+# descriptions, and a client-side apply stores the entire manifest in the
+# kubectl.kubernetes.io/last-applied-configuration annotation, which the API
+# server caps at 262144 bytes. Client-side fails with "metadata.annotations:
+# Too long" on clusterpolicies and policies.
+$KUBECTL apply --server-side --force-conflicts \
+  -f "https://github.com/kyverno/kyverno/releases/download/${KYVERNO_VERSION}/install.yaml"
 $KUBECTL -n kyverno rollout status deploy/kyverno-admission-controller --timeout=300s
 
 # Only ArgoCD's CRD, not ArgoCD itself: this test asserts that the operator
@@ -159,8 +180,19 @@ $KUBECTL wait --for=condition=Ready pod/ordinary-probe -n orders-api --timeout=1
 # must actually select it. A mislabelled workload would leave the PDB
 # protecting nothing, silently — which is the whole reason the contract is
 # documented in the README.
-expected=$($KUBECTL get poddisruptionbudget orders-api -n orders-api -o jsonpath='{.status.expectedPods}')
-[ "$expected" = "1" ] || fail "PDB selected ${expected:-0} pods; the label contract is broken"
+# currentHealthy is the field that answers "did the selector match?" — it is
+# the count of healthy pods the PDB selected, written by the disruption
+# controller once it has counted them.
+#
+# NOT expectedPods, which is 0 here and looks like a broken selector but is
+# not: expectedPods comes from the scale subresource of whatever controls the
+# pods, and this probe is a bare Pod with no Deployment behind it. A bare pod
+# is deliberate — it isolates the label contract from any question about
+# replica-set behaviour, which is Kubernetes' business rather than this
+# operator's.
+retry_until 60 "1" $KUBECTL get poddisruptionbudget orders-api -n orders-api \
+  -o jsonpath='{.status.currentHealthy}' \
+  || fail "PDB selected no pods; the label contract is broken"
 ok "PDB selects the labelled workload"
 
 log "all e2e checks passed"
