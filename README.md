@@ -48,11 +48,10 @@ This is a young project and says so. What works today:
   survives restarts
 - Spec validation with clear rejection reasons (surfaced in `.status`)
 - Unit, fake-client, and envtest suites (`make test`)
-
-Not yet demonstrated: the kind-based end-to-end test exists (`test/e2e/e2e.sh`) but
-has not been run green, so the claim that the Kyverno baseline *rejects* a
-privileged pod — as opposed to being installed — is not yet backed by a passing
-test. That is what the e2e is for.
+- A kind-based end-to-end test (`./test/e2e/e2e.sh`) that runs the quickstart on a real
+  cluster and proves the two things envtest structurally cannot: that the Kyverno
+  baseline **rejects** a privileged pod rather than merely existing, and that the
+  PodDisruptionBudget really selects a correctly labelled workload
 
 ## Why SLO-first
 
@@ -190,9 +189,9 @@ that label, or the PDB silently selects nothing.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md). Next up: a kind-based end-to-end test that runs the
-quickstart on a real cluster — which is also what proves the Kyverno baseline
-actually rejects a privileged or unsigned pod, rather than merely being installed.
+See [ROADMAP.md](ROADMAP.md). Next up: `spec.network.allowEgressTo`, which is what makes
+an egress default-deny safe to ship, and reading Kyverno's own policy status back so
+`AdmissionPolicyReady` reflects enforcement rather than storage.
 
 ## Development
 
