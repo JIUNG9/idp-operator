@@ -119,29 +119,41 @@ exact behaviour the rule exists to prevent. Unit tests could never show it: they
 `Reconcile` by hand, so the loop never runs. Re-evaluation is now paced by elapsed
 time, which also stops the operator querying Prometheus once per event.
 
-## M4 — ship 🚧
+## M4 — ship ✅ (v0.5.0)
 
 - [x] Dockerfile: distroless, non-root, static binary
-- [x] kind-based e2e (`test/e2e/e2e.sh`) — the README quickstart executed, and the
-      only place that proves what envtest cannot: that the Kyverno baseline actually
-      **rejects** a privileged pod, and that the PDB really selects a correctly
-      labelled workload. Also asserts an ordinary pod is still admitted, because a
-      baseline that fails every normal manifest gets switched off.
+- [x] kind-based e2e (`test/e2e/e2e.sh`) — the README quickstart executed, **run green
+      2026-09-01**. It is the only place that proves what envtest cannot: the Kyverno
+      baseline actually **rejects** a privileged pod, and the PDB really selects a
+      correctly labelled workload. It also asserts an ordinary pod is still admitted,
+      because a baseline that fails every normal manifest gets switched off.
 - [x] CI: build, vet, gofmt, generated-output-in-sync, unit + envtest; e2e on demand
       (PR label `e2e` or manual dispatch, since it builds an image and stands up a
       cluster)
 - [x] OSS hygiene workflow + `docs/OSS_HYGIENE.md`, from the shared template
 - [x] Example gallery: minimal, full-spec, budget-gated
-- [ ] **The e2e has never been executed.** It is written and statically checked
-      (`bash -n`, YAML parsed, manifests validated offline), but running it means
-      creating a cluster and applying manifests, which needs an explicit go-ahead.
-      Until it has run green, treat it as unverified — the whole point of this repo
-      is not claiming things that have not been demonstrated.
 - [ ] Demo GIF
 - [ ] Final review of history and tree for anything non-public, then flip to public
 
-**Exit:** public repo, CI green on the first public commit. **Not met yet** — by
-definition it cannot be, until the repo is pushed.
+**Exit:** public repo, CI green on the first public commit. **Half met.** The engineering
+gate — the e2e — is green. What remains is a push-time event: no local action can make CI
+run on a public commit, so that box stays open until the repo is public.
+
+### What the first e2e run found
+
+Both findings were in the test, not the operator — established by inspecting the live
+cluster rather than assuming, which is the only reason that claim is worth anything.
+
+1. **Kyverno cannot be installed with a client-side apply.** Its CRDs carry enormous
+   descriptions, and client-side apply stores the entire manifest in the
+   `last-applied-configuration` annotation, which the API server caps at 262144 bytes.
+   It fails on `clusterpolicies` and `policies`. Server-side apply does not write that
+   annotation.
+2. **The label-contract assertion read the wrong field.** `expectedPods` was 0, which
+   looks exactly like a broken selector. It is not: that field derives from the scale
+   subresource of whatever controls the pods, and the probe is a bare Pod with no
+   Deployment behind it. `currentHealthy` — the count of healthy pods the selector
+   actually matched — was 1 throughout.
 
 ## The label contract
 

@@ -3,7 +3,7 @@
 Notable changes per milestone. Versions are `v0.x` while the API is `v1alpha1`
 and may still change.
 
-## Unreleased — M4, ship
+## v0.5.0 — M4, ship
 
 - Dockerfile (distroless, non-root, static binary)
 - kind-based end-to-end test: the README quickstart executed, plus the two
@@ -15,6 +15,17 @@ and may still change.
   config-only changes
 - Example gallery: `minimal.yaml`, `orders-api.yaml` (full spec),
   `budget-gated.yaml`
+
+The e2e's first real run found two things, both in the test rather than the
+operator, and both confirmed against a live cluster rather than assumed:
+Kyverno cannot be installed with a client-side apply (its CRDs exceed the
+262144-byte `last-applied-configuration` annotation cap), and the label-contract
+assertion read `expectedPods` — which is 0 for a bare pod because it derives
+from the scale subresource of a controller that isn't there — instead of
+`currentHealthy`, which was 1 throughout.
+
+Still open, and not a code gap: "CI green on the first public commit" cannot be
+satisfied by any local action. It waits on the repo going public.
 
 ## v0.4.0 — M3, budget-aware delivery
 
