@@ -3,6 +3,16 @@
 Notable changes per milestone. Versions are `v0.x` while the API is `v1alpha1`
 and may still change.
 
+## Unreleased
+
+- e2e: on failure, dump pod descriptions, events, operator logs and the
+  ServiceDeployment status before the cluster is deleted, so a CI timeout
+  explains itself
+- e2e: the probe pods run `registry.k8s.io/pause:3.10`, which kind nodes already
+  carry, instead of pulling busybox from a public registry (`ErrImagePull`,
+  429 on shared runners). `PROBE_IMAGE` overrides it; the script checks the
+  image is on the node first
+
 ## v0.5.0 — M4, ship
 
 - Dockerfile (distroless, non-root, static binary)
