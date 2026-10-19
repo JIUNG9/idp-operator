@@ -37,7 +37,7 @@ The principle in one line: **if a rule can only be upheld by a human remembering
 ### 1. Employer name check
 
 ```
-PATTERN: placen|naver|coupang|lotte|hyundai
+PATTERN: placen|naver|coupang|lotte|hyundai|n-fnb|nowwaiting|dodopoint|whitelabel|connectorder
 # (These are the terms the check greps FOR. They must stay literal here and in
 #  the workflow, or the check stops catching anything.)
 SCOPE:   *.py, *.go, *.ts, *.tsx, *.js, *.jsx, *.json, *.yaml, *.yml, *.sh, *.toml
