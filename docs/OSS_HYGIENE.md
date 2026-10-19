@@ -37,7 +37,7 @@ The principle in one line: **if a rule can only be upheld by a human remembering
 ### 1. Employer name check
 
 ```
-PATTERN: acme-corp|acme-corp|acme-retail|acme-retail|acme-it
+PATTERN: acme-corp|acme-corp|acme-retail|acme-retail|acme-it|acme-corp|prod-a|prod-b|prod-c|acme-app
 # (These are the terms the check greps FOR. They must stay literal here and in
 #  the workflow, or the check stops catching anything.)
 SCOPE:   *.py, *.go, *.ts, *.tsx, *.js, *.jsx, *.json, *.yaml, *.yml, *.sh, *.toml
