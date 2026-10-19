@@ -37,7 +37,7 @@ The principle in one line: **if a rule can only be upheld by a human remembering
 ### 1. Employer name check
 
 ```
-PATTERN: acme-corp|acme-corp|acme-retail|acme-retail|acme-it|acme-corp|prod-a|prod-b|prod-c|acme-app
+PATTERN: acme|acme|acme|lotte|hyundai|n-fnb|app-a|app-b|whitelabel|example-app
 # (These are the terms the check greps FOR. They must stay literal here and in
 #  the workflow, or the check stops catching anything.)
 SCOPE:   *.py, *.go, *.ts, *.tsx, *.js, *.jsx, *.json, *.yaml, *.yml, *.sh, *.toml
@@ -49,7 +49,7 @@ Zero matches required. Update the pattern list when the author changes employer.
 ### 2. Personal email check
 
 ```
-PATTERN: jiung\.gu@|@acme-corp\.co\.kr|@acme-corp\.com|@acme-retail\.com
+PATTERN: jiung\.gu@|@acme\.co\.kr|@acme\.com|@acme\.com
 SCOPE:   *.py, *.go, *.ts, *.tsx, *.js, *.jsx, *.toml
 EXCLUDE: node_modules/, .git/, articles/, docs/, memory/
 ```
