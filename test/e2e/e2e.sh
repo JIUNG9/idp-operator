@@ -18,6 +18,7 @@ set -euo pipefail
 CLUSTER="${CLUSTER:-idp-e2e}"
 KUBECTL="kubectl --context kind-${CLUSTER}"
 KEEP="${KEEP:-0}"
+PROBE_IMAGE="${PROBE_IMAGE:-registry.k8s.io/pause:3.10}"
 KYVERNO_VERSION="${KYVERNO_VERSION:-v1.13.4}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -40,8 +41,32 @@ retry_until() {
   return 1
 }
 
+# diagnose — on failure, print what an engineer would otherwise have to
+# reproduce locally: why pods are not Ready (events, image pulls, scheduling)
+# and what the operator itself said. A bare "timed out waiting for the
+# condition" on a CI runner tells you nothing else.
+diagnose() {
+  log "diagnostics (the run failed)"
+  {
+    echo "--- pods, all namespaces"
+    $KUBECTL get pods -A -o wide
+    echo "--- describe pods in orders-api"
+    $KUBECTL describe pods -n orders-api
+    echo "--- events in orders-api"
+    $KUBECTL get events -n orders-api --sort-by=.lastTimestamp
+    echo "--- operator logs (last 200 lines)"
+    $KUBECTL -n idp-system logs deploy/idp-operator --tail=200
+    echo "--- servicedeployment status"
+    $KUBECTL get servicedeployment -n idp-system -o yaml
+  } 2>&1 || true
+}
+
 cleanup() {
   local code=$?
+  # The cluster is still up here, so this is the last chance to look at it.
+  if [ "$code" -ne 0 ] && kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+    diagnose
+  fi
   if [ "$KEEP" = "1" ]; then
     echo "KEEP=1, leaving cluster ${CLUSTER} up for inspection"
   else
@@ -89,6 +114,15 @@ $KUBECTL -n idp-system patch deploy/idp-operator --type=json \
   -p '[{"op":"add","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}]'
 $KUBECTL -n idp-system rollout status deploy/idp-operator --timeout=180s
 
+# The probe pods run the pause image, which every kind node already carries as
+# its sandbox container, so nothing is pulled. The first version pulled busybox
+# from a public registry and timed out on shared CI runners with
+# ErrImagePull / 429 Too Many Requests: the test depended on a service it
+# does not care about. Override with PROBE_IMAGE if your node image differs.
+log "checking ${PROBE_IMAGE} is on the node"
+docker exec "${CLUSTER}-control-plane" crictl images 2>/dev/null | grep -q "${PROBE_IMAGE%%:*}" \
+  || fail "${PROBE_IMAGE} is not on the kind node; set PROBE_IMAGE to an image it carries"
+
 log "the quickstart: one manifest"
 $KUBECTL apply -f "$REPO_ROOT/examples/minimal.yaml"
 
@@ -131,7 +165,7 @@ ok "no PDB at one replica, and the status explains it"
 
 # --- the guardrail actually guards -------------------------------------------
 log "checking the Kyverno baseline rejects a privileged pod"
-if $KUBECTL apply -f - <<'EOF' 2>/dev/null
+if $KUBECTL apply -f - <<EOF 2>/dev/null
 apiVersion: v1
 kind: Pod
 metadata:
@@ -140,8 +174,7 @@ metadata:
 spec:
   containers:
     - name: probe
-      image: public.ecr.aws/docker/library/busybox:1.36
-      command: ["sh", "-c", "sleep 300"]
+      image: ${PROBE_IMAGE}
       securityContext:
         privileged: true
 EOF
@@ -153,7 +186,7 @@ ok "privileged pod rejected at admission"
 # A pod that asks for nothing unusual still goes through — a baseline that
 # fails every ordinary manifest would just get switched off. It carries the
 # label the golden path selects on, which the PDB check below depends on.
-$KUBECTL apply -f - <<'EOF' || fail "an ordinary pod was rejected"
+$KUBECTL apply -f - <<EOF || fail "an ordinary pod was rejected"
 apiVersion: v1
 kind: Pod
 metadata:
@@ -164,8 +197,7 @@ metadata:
 spec:
   containers:
     - name: probe
-      image: public.ecr.aws/docker/library/busybox:1.36
-      command: ["sh", "-c", "sleep 300"]
+      image: ${PROBE_IMAGE}
 EOF
 ok "ordinary pod admitted"
 
