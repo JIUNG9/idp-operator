@@ -5,6 +5,9 @@ and may still change.
 
 ## Unreleased
 
+- Backstage software template (`templates/backstage/service-deployment/`): a form that opens a PR adding a
+  `ServiceDeployment`. `test/scaffolder` fails if the form drifts from the CRD or the skeleton stops rendering a
+  valid manifest
 - e2e: on failure, dump pod descriptions, events, operator logs and the
   ServiceDeployment status before the cluster is deleted, so a CI timeout
   explains itself
