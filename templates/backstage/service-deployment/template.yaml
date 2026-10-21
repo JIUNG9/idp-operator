@@ -1,0 +1,126 @@
+# Backstage software template: a form that opens a pull request adding one
+# ServiceDeployment to the platform repo. The operator does the rest once it
+# merges. Field names, types, defaults and limits mirror the CRD; the drift test
+# in test/scaffolder fails when they stop matching.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: service-deployment
+  title: Golden-path service
+  description: Namespace, SLO baseline, PodDisruptionBudget, NetworkPolicies, Kyverno baseline and an ArgoCD Application from one manifest.
+  tags:
+    - idp-operator
+    - golden-path
+spec:
+  owner: group:default/platform
+  type: service
+  parameters:
+    - title: Service
+      required:
+        - name
+        - team
+      properties:
+        name:
+          title: Name
+          type: string
+          description: Becomes the ServiceDeployment name and the namespace of the service.
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          maxLength: 63
+        team:
+          title: Team
+          type: string
+          description: Owning team; stamped on every provisioned object.
+          minLength: 1
+    - title: Reliability
+      properties:
+        tier:
+          title: Tier
+          type: integer
+          description: Criticality, 0 the most critical. Decides how hard a depleted error budget stops automated delivery.
+          default: 2
+          minimum: 0
+          maximum: 3
+        environment:
+          title: Environment
+          type: string
+          description: Prod is the default on purpose; an unlabelled service is the one most likely to be mislabelled.
+          default: prod
+          enum:
+            - prod
+            - staging
+            - dev
+        replicas:
+          title: Replicas
+          type: integer
+          description: Drives the PodDisruptionBudget. 0 or 1 gets no PDB, and the status says why.
+          default: 1
+          minimum: 0
+        availabilityTarget:
+          title: Availability target (%)
+          type: string
+          description: A percentage, for example 99.9.
+          default: '99.9'
+          pattern: '^\d{1,2}(\.\d+)?$'
+        latencyP99Ms:
+          title: p99 latency target (ms)
+          type: integer
+          default: 300
+          minimum: 1
+    - title: Delivery
+      required:
+        - repoURL
+        - path
+      properties:
+        repoURL:
+          title: Deploy repository URL
+          type: string
+          description: Repository holding the manifests ArgoCD delivers.
+          minLength: 1
+        path:
+          title: Path
+          type: string
+          description: Directory in that repository, for example overlays/prod.
+          minLength: 1
+        targetRevision:
+          title: Target revision
+          type: string
+          default: HEAD
+        project:
+          title: ArgoCD project
+          type: string
+          default: default
+  steps:
+    - id: render
+      name: Render the manifest
+      action: fetch:template
+      input:
+        url: ./skeleton
+        targetPath: ./services
+        values:
+          name: ${{ parameters.name }}
+          team: ${{ parameters.team }}
+          tier: ${{ parameters.tier }}
+          environment: ${{ parameters.environment }}
+          replicas: ${{ parameters.replicas }}
+          availabilityTarget: ${{ parameters.availabilityTarget }}
+          latencyP99Ms: ${{ parameters.latencyP99Ms }}
+          repoURL: ${{ parameters.repoURL }}
+          path: ${{ parameters.path }}
+          targetRevision: ${{ parameters.targetRevision }}
+          project: ${{ parameters.project }}
+    - id: pull-request
+      name: Open a pull request
+      action: publish:github:pull-request
+      input:
+        # Change owner and repo to the repository the operator's manifests are applied from.
+        repoUrl: github.com?owner=acme-corp&repo=platform-services
+        branchName: add-${{ parameters.name }}
+        title: Add ${{ parameters.name }} to the golden path
+        description: |
+          Adds a ServiceDeployment for `${{ parameters.name }}` (team `${{ parameters.team }}`,
+          tier ${{ parameters.tier }}, ${{ parameters.environment }}).
+        targetPath: services
+  output:
+    links:
+      - title: Pull request
+        url: ${{ steps['pull-request'].output.remoteUrl }}
