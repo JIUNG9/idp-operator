@@ -1,0 +1,18 @@
+apiVersion: idp.jiung9.github.io/v1alpha1
+kind: ServiceDeployment
+metadata:
+  name: ${{ values.name }}
+  namespace: idp-system
+spec:
+  team: ${{ values.team }}
+  replicas: ${{ values.replicas }}
+  tier: ${{ values.tier }}
+  environment: ${{ values.environment }}
+  slo:
+    availabilityTarget: "${{ values.availabilityTarget }}"
+    latencyP99Ms: ${{ values.latencyP99Ms }}
+  gitops:
+    repoURL: ${{ values.repoURL }}
+    path: ${{ values.path }}
+    targetRevision: ${{ values.targetRevision }}
+    project: ${{ values.project }}
