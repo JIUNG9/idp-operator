@@ -31,6 +31,8 @@ spec:
 
 That's the whole onboarding. See `examples/orders-api.yaml` for the full shape.
 
+Teams that use Backstage can fill in a form instead: see [Backstage template](#backstage-template).
+
 Every component reports its own status condition — `NamespaceReady`, `SLOReady`,
 `PDBReady`, `NetworkPolicyReady`, `AdmissionPolicyReady`, `BudgetGateReady`,
 `DeliveryReady` — and the aggregate `Provisioned` condition names anything that was
@@ -186,6 +188,22 @@ service, not what a compromised pod inside it can reach. Containment is
 The PDB selects workloads by `app.kubernetes.io/name: <service-name>`. The operator
 never creates your workload — your GitOps repo does — so your manifests must carry
 that label, or the PDB silently selects nothing.
+
+## Backstage template
+
+`templates/backstage/service-deployment/` is a software template (`scaffolder.backstage.io/v1beta3`).
+The form collects the `ServiceDeployment` fields, renders `skeleton/` into `services/<name>.yaml`, and opens a
+pull request with `publish:github:pull-request`. The operator picks the manifest up after it merges, so the
+form never talks to the cluster.
+
+To use it, register `template.yaml` in your Backstage catalog and change `owner` and `repo` in the
+`pull-request` step to the repository your platform manifests are applied from. The skeleton writes
+`namespace: idp-system`, the namespace used in `examples/`; edit it if the operator watches another one.
+
+The form is a second copy of the CRD schema, so `go test ./test/scaffolder` checks it: every spec field has a form
+field with the same type, default, enum, bounds and pattern, the CRD's required fields are required in the form,
+and the skeleton renders to a manifest that decodes into the API type. Changing the CRD without the form fails
+that test.
 
 ## Roadmap
 
