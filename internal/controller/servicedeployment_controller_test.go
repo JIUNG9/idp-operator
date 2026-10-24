@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -427,7 +428,7 @@ func TestReconcileSkipsAdmissionPolicyWithoutKyverno(t *testing.T) {
 
 func TestReconcileProvisionsAdmissionPolicy(t *testing.T) {
 	sd := valid()
-	c, r, req := newFixtureOpts(t, sd, kyvernoMapper(), nil)
+	c, r, req := newFixtureOpts(t, sd, kyvernoMapper(), nil, deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}))
 
 	res, err := r.Reconcile(context.Background(), req)
 	if err != nil {
@@ -626,5 +627,69 @@ func TestFailWrapsTheUnderlyingError(t *testing.T) {
 	}
 	if errors.Unwrap(err) == nil {
 		t.Fatal("the cause must stay wrapped so errors.Is/As keep working")
+	}
+}
+
+func deploymentWithPodLabels(name string, labels map[string]string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "orders-api"},
+		Spec:       appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}}},
+	}
+}
+
+func TestWorkloadsSelectedCondition(t *testing.T) {
+	cases := []struct {
+		name     string
+		objs     []client.Object
+		replicas int32
+		status   metav1.ConditionStatus
+		reason   string
+		message  string
+		requeue  bool
+	}{
+		{"labelled deployment", []client.Object{deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"})},
+			3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
+		{"label missing from the pod template", []client.Object{deploymentWithPodLabels("api", map[string]string{"app": "orders-api"})},
+			3, metav1.ConditionFalse, "LabelMissing", "Deployment/api", true},
+		{"one of two is unlabelled", []client.Object{
+			deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}),
+			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "orders-api"}},
+		}, 3, metav1.ConditionFalse, "LabelMissing", "StatefulSet/cache", true},
+		{"nothing delivered yet", nil, 3, metav1.ConditionFalse, "NoWorkloads", "no Deployment", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sd := valid()
+			sd.Spec.Replicas = ptr(tc.replicas)
+			c, r, req := newFixture(t, sd, tc.objs...)
+			res, err := r.Reconcile(context.Background(), req)
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			got := getSD(t, c, sd.Name, sd.Namespace)
+			cond := apimeta.FindStatusCondition(got.Status.Conditions, CondWorkloadsSelected)
+			if cond == nil || cond.Status != tc.status || cond.Reason != tc.reason || !strings.Contains(cond.Message, tc.message) {
+				t.Fatalf("WorkloadsSelected wrong: %+v", cond)
+			}
+			if got.Status.Phase != PhaseProvisioned {
+				t.Fatalf("phase = %q; a mislabelled workload is degraded, not broken", got.Status.Phase)
+			}
+			if tc.requeue && res.RequeueAfter == 0 {
+				t.Fatal("a fixed label or a late sync is not watched; the reconcile must come back")
+			}
+		})
+	}
+}
+
+func TestWorkloadsSelectedIsOmittedWithoutAPDB(t *testing.T) {
+	sd := valid()
+	sd.Spec.Replicas = ptr(int32(1))
+	c, r, req := newFixture(t, sd, deploymentWithPodLabels("api", nil))
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	if cond := apimeta.FindStatusCondition(got.Status.Conditions, CondWorkloadsSelected); cond != nil {
+		t.Fatalf("no PDB, nothing to select; condition should be absent: %+v", cond)
 	}
 }

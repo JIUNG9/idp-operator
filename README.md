@@ -35,9 +35,14 @@ Teams that use Backstage can fill in a form instead: see [Backstage template](#b
 
 Every component reports its own status condition — `NamespaceReady`, `SLOReady`,
 `PDBReady`, `NetworkPolicyReady`, `AdmissionPolicyReady`, `BudgetGateReady`,
-`DeliveryReady` — and the aggregate `Provisioned` condition names anything that was
+`DeliveryReady`, `WorkloadsSelected` — and the aggregate `Provisioned` condition names anything that was
 skipped or is degraded. A guardrail that isn't there says so; it never reads as
 healthy.
+
+`WorkloadsSelected` reads the Deployments and StatefulSets in the service namespace and
+reports any whose pod template lacks `app.kubernetes.io/name: <service>`, the label the PDB
+selects on. It is absent for services without a PDB, and reads `NoWorkloads` until the first
+workload is delivered. It never edits a workload.
 
 ## Status: early development
 
