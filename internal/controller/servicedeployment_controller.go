@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -80,6 +81,7 @@ const (
 	CondNamespaceReady       = "NamespaceReady"
 	CondSLOReady             = "SLOReady"
 	CondPDBReady             = "PDBReady"
+	CondWorkloadsSelected    = "WorkloadsSelected"
 	CondNetworkPolicyReady   = "NetworkPolicyReady"
 	CondAdmissionPolicyReady = "AdmissionPolicyReady"
 	CondDeliveryReady        = "DeliveryReady"
@@ -209,6 +211,7 @@ func (c *components) all() []metav1.Condition {
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -269,6 +272,7 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return err
 		}},
 		{CondDeliveryReady, "argocd application", func() error { return r.reconcileApplication(ctx, &sd, labels, c, verdict) }},
+		{CondWorkloadsSelected, "workload labels", func() error { return r.reconcileWorkloadSelection(ctx, &sd, c) }},
 	}
 	for _, s := range steps {
 		if err := s.run(); err != nil {
@@ -386,6 +390,48 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 		return err
 	}
 	c.ready(CondPDBReady, "Protected", fmt.Sprintf("maxUnavailable=1 across %d replicas", replicas))
+	return nil
+}
+
+// reconcileWorkloadSelection checks that the workloads delivered into the
+// service namespace carry the label the PDB selects on. The workload comes
+// from the team's GitOps repo, so a missing label leaves a PDB that selects
+// nothing. It only reads: it never edits a workload it does not own. With no
+// PDB there is nothing to select, so no condition is reported.
+func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, c *components) error {
+	if !PDBWanted(sd.Spec.ReplicasOrDefault()) {
+		return nil
+	}
+	// Uncached: the manager cache is filtered to this operator's own labels,
+	// which a team's workloads do not carry.
+	var deployments appsv1.DeploymentList
+	if err := r.reader().List(ctx, &deployments, client.InNamespace(sd.Name)); err != nil {
+		return err
+	}
+	var statefulSets appsv1.StatefulSetList
+	if err := r.reader().List(ctx, &statefulSets, client.InNamespace(sd.Name)); err != nil {
+		return err
+	}
+	var workloads []Workload
+	for _, d := range deployments.Items {
+		workloads = append(workloads, Workload{"Deployment", d.Name, d.Spec.Template.Labels})
+	}
+	for _, s := range statefulSets.Items {
+		workloads = append(workloads, Workload{"StatefulSet", s.Name, s.Spec.Template.Labels})
+	}
+	if len(workloads) == 0 {
+		// ArgoCD may not have synced yet, and no watch fires when it does.
+		c.skipEnvironmental(CondWorkloadsSelected, "NoWorkloads",
+			"no Deployment or StatefulSet in the namespace yet; the PDB selects nothing until one is delivered")
+		return nil
+	}
+	if bad := UnselectedWorkloads(sd.Name, workloads); len(bad) > 0 {
+		c.degrade(CondWorkloadsSelected, "LabelMissing", fmt.Sprintf(
+			"pod template lacks %s=%s, so the PDB does not select: %s", LabelName, sd.Name, strings.Join(bad, ", ")))
+		c.requeue(EnvironmentalRetryInterval)
+		return nil
+	}
+	c.ready(CondWorkloadsSelected, "Selected", fmt.Sprintf("%d workload(s) carry %s=%s", len(workloads), LabelName, sd.Name))
 	return nil
 }
 

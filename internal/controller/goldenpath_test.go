@@ -95,3 +95,20 @@ func TestApplyGitOpsDefaults(t *testing.T) {
 		t.Fatalf("gitops defaults wrong: %+v", got)
 	}
 }
+
+func TestUnselectedWorkloads(t *testing.T) {
+	ws := []Workload{
+		{"Deployment", "api", map[string]string{LabelName: "orders-api"}},
+		{"Deployment", "worker", map[string]string{"app": "orders-api"}},
+		{"StatefulSet", "cache", nil},
+		{"StatefulSet", "other", map[string]string{LabelName: "billing"}},
+	}
+	got := UnselectedWorkloads("orders-api", ws)
+	want := []string{"Deployment/worker", "StatefulSet/cache", "StatefulSet/other"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got := UnselectedWorkloads("orders-api", ws[:1]); len(got) != 0 {
+		t.Fatalf("a labelled workload must be selected, got %v", got)
+	}
+}

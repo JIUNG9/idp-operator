@@ -64,8 +64,8 @@ func budgetCond(t *testing.T, c client.Client, sd *idpv1alpha1.ServiceDeployment
 func TestBudgetGateNotConfiguredLeavesDeliveryAlone(t *testing.T) {
 	sd := valid()
 	// Kyverno present, so the only thing that could ask for a requeue here
-	// is the budget gate.
-	c, r, req := newFixtureOpts(t, sd, kyvernoMapper(), nil)
+	// is the budget gate; a labelled workload keeps WorkloadsSelected quiet.
+	c, r, req := newFixtureOpts(t, sd, kyvernoMapper(), nil, deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}))
 
 	res, err := r.Reconcile(context.Background(), req)
 	if err != nil {

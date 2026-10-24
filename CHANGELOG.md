@@ -5,6 +5,10 @@ and may still change.
 
 ## Unreleased
 
+- `WorkloadsSelected` condition: lists Deployments and StatefulSets in the service namespace and
+  reports any whose pod template lacks `app.kubernetes.io/name: <service>`, the label the PDB
+  selects on (`LabelMissing`, degraded). `NoWorkloads` until something is delivered. Omitted when
+  the service has no PDB. Adds a `get;list` RBAC rule on `apps` Deployments and StatefulSets
 - Backstage software template (`templates/backstage/service-deployment/`): a form that opens a PR adding a
   `ServiceDeployment`. `test/scaffolder` fails if the form drifts from the CRD or the skeleton stops rendering a
   valid manifest
