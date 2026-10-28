@@ -134,7 +134,8 @@ func UnselectedWorkloads(service string, workloads []Workload) []string {
 	return out
 }
 
-// Workload is the part of a Deployment or StatefulSet the label check reads.
+// Workload is the part of a Deployment, StatefulSet or bare Pod the label check reads.
+// For a Pod, PodLabels are its own labels.
 type Workload struct {
 	Kind, Name string
 	PodLabels  map[string]string
