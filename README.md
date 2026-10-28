@@ -39,10 +39,11 @@ Every component reports its own status condition — `NamespaceReady`, `SLOReady
 skipped or is degraded. A guardrail that isn't there says so; it never reads as
 healthy.
 
-`WorkloadsSelected` reads the Deployments and StatefulSets in the service namespace and
-reports any whose pod template lacks `app.kubernetes.io/name: <service>`, the label the PDB
+`WorkloadsSelected` reads the Deployments, StatefulSets and bare Pods in the service namespace and
+reports any whose pod template (or, for a Pod, labels) lacks `app.kubernetes.io/name: <service>`, the label the PDB
 selects on. It is absent for services without a PDB, and reads `NoWorkloads` until the first
-workload is delivered. It never edits a workload.
+workload is delivered. Bare Pods (no controller owner) are checked on their own labels. It never
+edits a workload.
 
 ## Status: early development
 
