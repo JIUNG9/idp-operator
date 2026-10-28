@@ -212,6 +212,7 @@ func (c *components) all() []metav1.Condition {
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -396,7 +397,8 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 // reconcileWorkloadSelection checks that the workloads delivered into the
 // service namespace carry the label the PDB selects on. The workload comes
 // from the team's GitOps repo, so a missing label leaves a PDB that selects
-// nothing. It only reads: it never edits a workload it does not own. With no
+// nothing. Bare Pods (no controller owner) are checked on their own labels;
+// pods a controller owns are covered through its template. It only reads: it never edits a workload it does not own. With no
 // PDB there is nothing to select, so no condition is reported.
 func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, c *components) error {
 	if !PDBWanted(sd.Spec.ReplicasOrDefault()) {
@@ -412,6 +414,10 @@ func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Con
 	if err := r.reader().List(ctx, &statefulSets, client.InNamespace(sd.Name)); err != nil {
 		return err
 	}
+	var pods corev1.PodList
+	if err := r.reader().List(ctx, &pods, client.InNamespace(sd.Name)); err != nil {
+		return err
+	}
 	var workloads []Workload
 	for _, d := range deployments.Items {
 		workloads = append(workloads, Workload{"Deployment", d.Name, d.Spec.Template.Labels})
@@ -419,10 +425,16 @@ func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Con
 	for _, s := range statefulSets.Items {
 		workloads = append(workloads, Workload{"StatefulSet", s.Name, s.Spec.Template.Labels})
 	}
+	for _, p := range pods.Items {
+		// A pod with a controller is covered through its owner's template.
+		if metav1.GetControllerOf(&p) == nil {
+			workloads = append(workloads, Workload{"Pod", p.Name, p.Labels})
+		}
+	}
 	if len(workloads) == 0 {
 		// ArgoCD may not have synced yet, and no watch fires when it does.
 		c.skipEnvironmental(CondWorkloadsSelected, "NoWorkloads",
-			"no Deployment or StatefulSet in the namespace yet; the PDB selects nothing until one is delivered")
+			"no Deployment, StatefulSet or bare Pod in the namespace yet; the PDB selects nothing until one is delivered")
 		return nil
 	}
 	if bad := UnselectedWorkloads(sd.Name, workloads); len(bad) > 0 {

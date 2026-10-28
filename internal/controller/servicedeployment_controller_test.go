@@ -637,6 +637,16 @@ func deploymentWithPodLabels(name string, labels map[string]string) *appsv1.Depl
 	}
 }
 
+func barePod(name string, labels map[string]string, owned bool) *corev1.Pod {
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "orders-api", Labels: labels}}
+	if owned {
+		p.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "apps/v1", Kind: "ReplicaSet", Name: name + "-rs", UID: "u1", Controller: ptr(true),
+		}}
+	}
+	return p
+}
+
 func TestWorkloadsSelectedCondition(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -656,6 +666,14 @@ func TestWorkloadsSelectedCondition(t *testing.T) {
 			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "orders-api"}},
 		}, 3, metav1.ConditionFalse, "LabelMissing", "StatefulSet/cache", true},
 		{"nothing delivered yet", nil, 3, metav1.ConditionFalse, "NoWorkloads", "no Deployment", true},
+		{"labelled bare pod", []client.Object{barePod("job", map[string]string{LabelName: "orders-api"}, false)},
+			3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
+		{"unlabelled bare pod", []client.Object{barePod("debug", map[string]string{"app": "x"}, false)},
+			3, metav1.ConditionFalse, "LabelMissing", "Pod/debug", true},
+		{"pod owned by a controller is judged by its owner's template", []client.Object{
+			deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}),
+			barePod("api-abc", nil, true),
+		}, 3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

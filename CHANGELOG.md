@@ -9,6 +9,8 @@ and may still change.
   reports any whose pod template lacks `app.kubernetes.io/name: <service>`, the label the PDB
   selects on (`LabelMissing`, degraded). `NoWorkloads` until something is delivered. Omitted when
   the service has no PDB. Adds a `get;list` RBAC rule on `apps` Deployments and StatefulSets
+- `WorkloadsSelected` also checks bare Pods (no controller owner) on their own labels. Pods owned by a
+  controller are still judged through the owner's template. Adds a `get;list` RBAC rule on `pods`
 - Backstage software template (`templates/backstage/service-deployment/`): a form that opens a PR adding a
   `ServiceDeployment`. `test/scaffolder` fails if the form drifts from the CRD or the skeleton stops rendering a
   valid manifest
