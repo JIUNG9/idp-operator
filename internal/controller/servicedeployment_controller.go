@@ -92,6 +92,10 @@ const (
 // as unstructured so the operator has no ArgoCD Go dependency.
 var ApplicationGVK = schema.GroupVersionKind{Group: "argoproj.io", Version: "v1alpha1", Kind: "Application"}
 
+// RolloutListGVK is the Argo Rollouts list kind, read as unstructured for the
+// same reason. The CRD is optional.
+var RolloutListGVK = schema.GroupVersionKind{Group: "argoproj.io", Version: "v1alpha1", Kind: "RolloutList"}
+
 // ServiceDeploymentReconciler provisions the golden path for one manifest:
 // namespace -> SLO baseline -> PDB -> policy -> ArgoCD Application.
 type ServiceDeploymentReconciler struct {
@@ -212,6 +216,7 @@ func (c *components) all() []metav1.Condition {
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list
+// +kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -397,7 +402,7 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 // reconcileWorkloadSelection checks that the workloads delivered into the
 // service namespace carry the label the PDB selects on. The workload comes
 // from the team's GitOps repo, so a missing label leaves a PDB that selects
-// nothing. Bare Pods (no controller owner) are checked on their own labels;
+// nothing. Argo Rollouts are read when their CRD is installed. Bare Pods (no controller owner) are checked on their own labels;
 // pods a controller owns are covered through its template. It only reads: it never edits a workload it does not own. With no
 // PDB there is nothing to select, so no condition is reported.
 func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, c *components) error {
@@ -418,7 +423,12 @@ func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Con
 	if err := r.reader().List(ctx, &pods, client.InNamespace(sd.Name)); err != nil {
 		return err
 	}
+	rollouts, err := r.listRollouts(ctx, sd.Name)
+	if err != nil {
+		return err
+	}
 	var workloads []Workload
+	workloads = append(workloads, rollouts...)
 	for _, d := range deployments.Items {
 		workloads = append(workloads, Workload{"Deployment", d.Name, d.Spec.Template.Labels})
 	}
@@ -434,7 +444,7 @@ func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Con
 	if len(workloads) == 0 {
 		// ArgoCD may not have synced yet, and no watch fires when it does.
 		c.skipEnvironmental(CondWorkloadsSelected, "NoWorkloads",
-			"no Deployment, StatefulSet or bare Pod in the namespace yet; the PDB selects nothing until one is delivered")
+			"no Deployment, StatefulSet, Rollout or bare Pod in the namespace yet; the PDB selects nothing until one is delivered")
 		return nil
 	}
 	if bad := UnselectedWorkloads(sd.Name, workloads); len(bad) > 0 {
@@ -445,6 +455,31 @@ func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Con
 	}
 	c.ready(CondWorkloadsSelected, "Selected", fmt.Sprintf("%d workload(s) carry %s=%s", len(workloads), LabelName, sd.Name))
 	return nil
+}
+
+// listRollouts returns the Argo Rollouts in the namespace as workloads, read
+// from spec.template.metadata.labels. The Rollout CRD is optional: when it is
+// not installed the API server answers NotFound (or the mapper reports no
+// match), and that means no Rollouts, not a failure.
+func (r *ServiceDeploymentReconciler) listRollouts(ctx context.Context, namespace string) ([]Workload, error) {
+	var list unstructured.UnstructuredList
+	list.SetGroupVersionKind(RolloutListGVK)
+	if err := r.reader().List(ctx, &list, client.InNamespace(namespace)); err != nil {
+		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []Workload
+	for _, item := range list.Items {
+		labels, _, err := unstructured.NestedStringMap(item.Object, "spec", "template", "metadata", "labels")
+		if err != nil {
+			// A malformed template has no usable labels; report it as unlabelled.
+			labels = nil
+		}
+		out = append(out, Workload{"Rollout", item.GetName(), labels})
+	}
+	return out, nil
 }
 
 // reconcileNetworkPolicies denies ingress by default and re-admits the two
