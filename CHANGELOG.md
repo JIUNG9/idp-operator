@@ -11,6 +11,9 @@ and may still change.
   the service has no PDB. Adds a `get;list` RBAC rule on `apps` Deployments and StatefulSets
 - `WorkloadsSelected` also checks bare Pods (no controller owner) on their own labels. Pods owned by a
   controller are still judged through the owner's template. Adds a `get;list` RBAC rule on `pods`
+- `WorkloadsSelected` also reads Argo Rollouts (`spec.template.metadata.labels`) when the Rollout CRD is installed.
+  A cluster without it behaves as before: a NotFound or no-match answer means no Rollouts. Any other list error
+  (for example Forbidden) fails the reconcile instead of hiding Rollouts. Adds a `get;list` RBAC rule on `rollouts`
 - Backstage software template (`templates/backstage/service-deployment/`): a form that opens a PR adding a
   `ServiceDeployment`. `test/scaffolder` fails if the form drifts from the CRD or the skeleton stops rendering a
   valid manifest

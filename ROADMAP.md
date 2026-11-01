@@ -161,16 +161,16 @@ The PDB (and everything else the operator provisions for a service) selects work
 by `app.kubernetes.io/name: <service-name>`. The operator never creates the workload —
 your GitOps repo does — so your manifests must carry that label. A mislabeled workload
 means a PDB that silently selects nothing. The e2e proves the contract end to end;
-the `WorkloadsSelected` condition reports any Deployment or StatefulSet whose pod template lacks it.
+the `WorkloadsSelected` condition reports any Deployment, StatefulSet or Argo Rollout whose pod template lacks it.
 It checks pod templates (and the labels of bare Pods), not the running pods a controller creates, and
-reads nothing but Deployments, StatefulSets and Pods.
+reads nothing but Deployments, StatefulSets, Rollouts and Pods.
 
 ## Next after M4
 
 - **`spec.network.allowEgressTo`** — declared dependencies become egress policy, which
   is what makes an egress default-deny safe to ship. Split out of M2 on purpose.
 - **Live workload verification, remaining part** — `WorkloadsSelected` covers Deployments and
-  StatefulSets by pod template, and bare Pods by their own labels. Argo Rollouts and the running pods a
+  StatefulSets and Argo Rollouts by pod template, and bare Pods by their own labels. The running pods a
   controller creates are not checked.
 - **Platform-enforced environment** — `spec.environment` weakens the budget verdict and
   is self-service, so a team can relabel prod as dev to win back automated delivery

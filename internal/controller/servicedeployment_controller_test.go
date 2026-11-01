@@ -553,7 +553,7 @@ func TestReconcileAdoptsAnObjectTheCacheCannotSee(t *testing.T) {
 		WithObjects(sd, squatter).WithStatusSubresource(sd).Build()
 
 	// Client behaves like the filtered cache: it cannot see the squatter.
-	hidden := interceptor.NewClient(base, interceptor.Funcs{
+	hidden := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if _, ok := obj.(*networkingv1.NetworkPolicy); ok && key.Name == NetworkPolicyDenyIngress {
 				return apierrors.NewNotFound(networkingv1.Resource("networkpolicies"), key.Name)
@@ -586,7 +586,7 @@ func TestSetStatusRetriesOnConflict(t *testing.T) {
 		WithObjects(sd).WithStatusSubresource(sd).Build()
 
 	var conflicts int
-	flaky := interceptor.NewClient(base, interceptor.Funcs{
+	flaky := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
 		SubResourceUpdate: func(ctx context.Context, cl client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 			if conflicts == 0 {
 				conflicts++
@@ -647,6 +647,17 @@ func barePod(name string, labels map[string]string, owned bool) *corev1.Pod {
 	return p
 }
 
+// rollout builds an Argo Rollout as unstructured, the way the operator reads it.
+func rollout(name string, templateLabels map[string]any) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"labels": templateLabels}}},
+	}}
+	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "argoproj.io", Version: "v1alpha1", Kind: "Rollout"})
+	u.SetName(name)
+	u.SetNamespace("orders-api")
+	return u
+}
+
 func TestWorkloadsSelectedCondition(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -674,6 +685,12 @@ func TestWorkloadsSelectedCondition(t *testing.T) {
 			deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}),
 			barePod("api-abc", nil, true),
 		}, 3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
+		{"labelled rollout", []client.Object{rollout("api", map[string]any{LabelName: "orders-api"})},
+			3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
+		{"rollout without the label", []client.Object{rollout("api", map[string]any{"app": "orders-api"})},
+			3, metav1.ConditionFalse, "LabelMissing", "Rollout/api", true},
+		{"rollout with no template labels", []client.Object{rollout("api", nil)},
+			3, metav1.ConditionFalse, "LabelMissing", "Rollout/api", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -696,6 +713,60 @@ func TestWorkloadsSelectedCondition(t *testing.T) {
 				t.Fatal("a fixed label or a late sync is not watched; the reconcile must come back")
 			}
 		})
+	}
+}
+
+// A cluster without Argo Rollouts answers NotFound for the Rollout list. That is
+// "no Rollouts", so the Deployment is still judged and nothing errors.
+func TestWorkloadsSelectedToleratesMissingRolloutCRD(t *testing.T) {
+	for name, listErr := range map[string]error{
+		"not found": apierrors.NewNotFound(schema.GroupResource{Group: "argoproj.io", Resource: "rollouts"}, ""),
+		"no match":  &apimeta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "argoproj.io", Kind: "Rollout"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sd := valid()
+			c, r, req := newFixtureOpts(t, sd, nil, func(r *ServiceDeploymentReconciler) {
+				base := r.Client
+				r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+					List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Kind == "RolloutList" {
+							return listErr
+						}
+						return cl.List(ctx, list, opts...)
+					},
+				})
+			}, deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}))
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			cond := apimeta.FindStatusCondition(getSD(t, c, sd.Name, sd.Namespace).Status.Conditions, CondWorkloadsSelected)
+			if cond == nil || cond.Reason != "Selected" {
+				t.Fatalf("WorkloadsSelected wrong: %+v", cond)
+			}
+		})
+	}
+}
+
+// Any other list error (RBAC, a flaky API server) is not "no Rollouts": a missing
+// grant would otherwise hide unlabelled Rollouts and report Selected.
+func TestWorkloadsSelectedSurfacesOtherRolloutListErrors(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, nil, func(r *ServiceDeploymentReconciler) {
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Kind == "RolloutList" {
+					return apierrors.NewForbidden(schema.GroupResource{Group: "argoproj.io", Resource: "rollouts"}, "", errors.New("rbac"))
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		})
+	}, deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}))
+	_, err := r.Reconcile(context.Background(), req)
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("reconcile error = %v, want the Forbidden wrapped", err)
+	}
+	if got := getSD(t, c, sd.Name, sd.Namespace); got.Status.Phase != PhaseError {
+		t.Fatalf("phase = %q, want %q", got.Status.Phase, PhaseError)
 	}
 }
 

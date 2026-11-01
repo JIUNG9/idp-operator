@@ -45,6 +45,13 @@ rules:
   - update
   - watch
 - apiGroups:
+  - argoproj.io
+  resources:
+  - rollouts
+  verbs:
+  - get
+  - list
+- apiGroups:
   - idp.jiung9.github.io
   resources:
   - servicedeployments
