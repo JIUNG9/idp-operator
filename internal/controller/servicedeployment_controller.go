@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -292,27 +293,113 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return ctrl.Result{RequeueAfter: c.requeueAfter}, r.setStatus(ctx, &sd, PhaseProvisioned, c.all()...)
 }
 
-// applyManaged creates or updates an object the golden path owns.
+// ReasonNotOwned is the condition reason when the operator refuses to touch
+// an object it did not create.
+const ReasonNotOwned = "NotOwned"
+
+// NotOwnedError reports that an object already exists under a name the golden
+// path wants, but does not carry this ServiceDeployment's ownership labels.
+type NotOwnedError struct{ msg string }
+
+func (e *NotOwnedError) Error() string { return e.msg }
+
+// checkOwned returns a NotOwnedError unless obj carries managed-by=idp-operator
+// and an owner-namespace that is empty (written before the label existed) or
+// equal to the ServiceDeployment's namespace. This is the one takeover rule:
+// the operator never adopts, overwrites or deletes anything outside it.
+func checkOwned(sd *idpv1alpha1.ServiceDeployment, obj client.Object) error {
+	l := obj.GetLabels()
+	what := fmt.Sprintf("%s %s/%s", objectKind(obj), obj.GetNamespace(), obj.GetName())
+	if l[LabelManagedBy] != ManagedByValue {
+		return &NotOwnedError{fmt.Sprintf("%s exists and is not managed by idp-operator; refusing to overwrite it", what)}
+	}
+	if owner := l[LabelOwnerNamespace]; owner != "" && owner != sd.Namespace {
+		return &NotOwnedError{fmt.Sprintf("%s is owned by a ServiceDeployment in %q; refusing to overwrite it", what, owner)}
+	}
+	return nil
+}
+
+func objectKind(obj client.Object) string {
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		return u.GetKind()
+	}
+	switch obj.(type) {
+	case *corev1.ConfigMap:
+		return "ConfigMap"
+	case *policyv1.PodDisruptionBudget:
+		return "PodDisruptionBudget"
+	case *networkingv1.NetworkPolicy:
+		return "NetworkPolicy"
+	}
+	return fmt.Sprintf("%T", obj)
+}
+
+// getExisting reads the live object through the uncached reader. The manager
+// cache is filtered to this operator's labels, so it can never show an object
+// somebody else created, which is exactly the case that has to be detected.
+// A missing object, or a kind the cluster does not serve, reads as absent.
+func (r *ServiceDeploymentReconciler) getExisting(ctx context.Context, obj client.Object) (bool, error) {
+	err := r.reader().Get(ctx, client.ObjectKeyFromObject(obj), obj)
+	switch {
+	case err == nil:
+		return true, nil
+	case apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err):
+		return false, nil
+	}
+	return false, err
+}
+
+// applyManaged creates or updates an object the golden path owns, and refuses
+// when the name is already taken by an object it does not own.
 //
-// controllerutil.CreateOrUpdate reads through the manager cache, which is
-// filtered to this operator's own labels. An object that exists but carries
-// different labels is invisible there, so the read says "absent", the create
-// loses to the real object, and the reconcile wedges on AlreadyExists forever
-// — a stray NetworkPolicy named like ours would be enough to stop a service
-// being provisioned. When that happens, read the truth uncached and take the
-// object over: these are guardrails, and the operator is their owner.
-func (r *ServiceDeploymentReconciler) applyManaged(ctx context.Context, obj client.Object, mutate controllerutil.MutateFn) error {
+// controllerutil.CreateOrUpdate reads through the filtered manager cache, so
+// an object with other labels reads as absent there and the create would lose
+// to it with AlreadyExists. The uncached read happens first and decides: an
+// existing object without our labels is reported as NotOwnedError, never
+// overwritten.
+func (r *ServiceDeploymentReconciler) applyManaged(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, obj client.Object, mutate controllerutil.MutateFn) error {
+	probe := obj.DeepCopyObject().(client.Object)
+	if found, err := r.getExisting(ctx, probe); err != nil {
+		return err
+	} else if found {
+		if err := checkOwned(sd, probe); err != nil {
+			return err
+		}
+	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, obj, mutate)
 	if !apierrors.IsAlreadyExists(err) {
 		return err
 	}
+	// Ours by label but not in the cache, or created between the read and the
+	// create. Re-check before writing.
 	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+		return err
+	}
+	if err := checkOwned(sd, obj); err != nil {
 		return err
 	}
 	if err := mutate(); err != nil {
 		return err
 	}
 	return r.Update(ctx, obj)
+}
+
+// deleteOwned deletes obj only when it exists and carries our ownership
+// labels. An object that is absent is already done; one we do not own is left
+// alone and reported, so a stale-object cleanup can never remove something a
+// team created under the same name.
+func (r *ServiceDeploymentReconciler) deleteOwned(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, obj client.Object) error {
+	found, err := r.getExisting(ctx, obj)
+	if err != nil || !found {
+		return err
+	}
+	if err := checkOwned(sd, obj); err != nil {
+		return err
+	}
+	if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // reconcileNamespace creates the service's home, refusing to adopt a
@@ -324,17 +411,17 @@ func (r *ServiceDeploymentReconciler) reconcileNamespace(ctx context.Context, sd
 	switch err := r.reader().Get(ctx, types.NamespacedName{Name: sd.Name}, &existing); {
 	case err == nil:
 		if existing.Labels[LabelManagedBy] != ManagedByValue {
-			return fmt.Errorf("namespace %q exists and is not managed by idp-operator", sd.Name)
+			return &NotOwnedError{fmt.Sprintf("namespace %q exists and is not managed by idp-operator", sd.Name)}
 		}
 		if owner := existing.Labels[LabelOwnerNamespace]; owner != "" && owner != sd.Namespace {
-			return fmt.Errorf("namespace %q is owned by a ServiceDeployment in %q", sd.Name, owner)
+			return &NotOwnedError{fmt.Sprintf("namespace %q is owned by a ServiceDeployment in %q", sd.Name, owner)}
 		}
 	case !apierrors.IsNotFound(err):
 		return err
 	}
 
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: sd.Name}}
-	if err := r.applyManaged(ctx, ns, func() error {
+	if err := r.applyManaged(ctx, sd, ns, func() error {
 		if ns.Labels == nil {
 			ns.Labels = map[string]string{}
 		}
@@ -352,7 +439,7 @@ func (r *ServiceDeploymentReconciler) reconcileNamespace(ctx context.Context, sd
 // reconcileSLOBaseline writes the reliability contract other tooling reads.
 func (r *ServiceDeploymentReconciler) reconcileSLOBaseline(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "slo-baseline", Namespace: sd.Name}}
-	if err := r.applyManaged(ctx, cm, func() error {
+	if err := r.applyManaged(ctx, sd, cm, func() error {
 		cm.Labels = labels
 		cm.Data = map[string]string{
 			"availability_target": sd.Spec.SLO.AvailabilityTarget,
@@ -375,7 +462,7 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 	replicas := sd.Spec.ReplicasOrDefault()
 	if !PDBWanted(replicas) {
 		stale := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: sd.Name, Namespace: sd.Name}}
-		if err := r.Delete(ctx, stale); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.deleteOwned(ctx, sd, stale); err != nil {
 			return err
 		}
 		reason, message := PDBSkipReason(replicas)
@@ -384,7 +471,7 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 	}
 
 	pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: sd.Name, Namespace: sd.Name}}
-	if err := r.applyManaged(ctx, pdb, func() error {
+	if err := r.applyManaged(ctx, sd, pdb, func() error {
 		pdb.Labels = labels
 		maxUnavailable := intstr.FromInt32(1)
 		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
@@ -488,7 +575,7 @@ func (r *ServiceDeploymentReconciler) listRollouts(ctx context.Context, namespac
 func (r *ServiceDeploymentReconciler) reconcileNetworkPolicies(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	apply := func(name string, spec networkingv1.NetworkPolicySpec) error {
 		np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sd.Name}}
-		return r.applyManaged(ctx, np, func() error {
+		return r.applyManaged(ctx, sd, np, func() error {
 			np.Labels = labels
 			np.Spec = spec
 			return nil
@@ -506,7 +593,7 @@ func (r *ServiceDeploymentReconciler) reconcileNetworkPolicies(ctx context.Conte
 	if !configured {
 		// Drop a policy left over from an earlier configuration.
 		stale := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: NetworkPolicyAllowPlatform, Namespace: sd.Name}}
-		if err := r.Delete(ctx, stale); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.deleteOwned(ctx, sd, stale); err != nil {
 			return err
 		}
 		// Not a skip: the deny is in force and correct. It does mean nothing
@@ -544,7 +631,7 @@ func (r *ServiceDeploymentReconciler) reconcileAdmissionPolicy(ctx context.Conte
 	pol.SetGroupVersionKind(KyvernoPolicyGVK)
 	pol.SetName(KyvernoPolicyName)
 	pol.SetNamespace(sd.Name)
-	if err := r.applyManaged(ctx, pol, func() error {
+	if err := r.applyManaged(ctx, sd, pol, func() error {
 		pol.SetLabels(labels)
 		return unstructured.SetNestedMap(pol.Object, KyvernoPolicySpec(r.Policy), "spec")
 	}); err != nil {
@@ -757,7 +844,7 @@ func (r *ServiceDeploymentReconciler) reconcileApplication(ctx context.Context, 
 	app.SetGroupVersionKind(ApplicationGVK)
 	app.SetName(sd.Name)
 	app.SetNamespace(ArgoCDNamespace)
-	if err := r.applyManaged(ctx, app, func() error {
+	if err := r.applyManaged(ctx, sd, app, func() error {
 		app.SetLabels(labels)
 		return unstructured.SetNestedMap(app.Object, map[string]any{
 			"project": sd.Spec.GitOps.Project,
@@ -812,8 +899,14 @@ func (r *ServiceDeploymentReconciler) finalize(ctx context.Context, sd *idpv1alp
 	app.SetGroupVersionKind(ApplicationGVK)
 	app.SetName(sd.Name)
 	app.SetNamespace(ArgoCDNamespace)
-	if err := r.Delete(ctx, app); err != nil &&
-		!apierrors.IsNotFound(err) && !apimeta.IsNoMatchError(err) {
+	switch err := r.deleteOwned(ctx, sd, app); {
+	case err == nil:
+	case errors.As(err, new(*NotOwnedError)):
+		// An Application with our name that we did not create: leave it, as
+		// with a namespace that is not ours, and let teardown finish.
+		log.FromContext(ctx).Info("skipping Application on teardown: not owned by this ServiceDeployment",
+			"application", sd.Name)
+	default:
 		return ctrl.Result{}, err
 	}
 
@@ -860,9 +953,13 @@ func (r *ServiceDeploymentReconciler) finalize(ctx context.Context, sd *idpv1alp
 // the error so controller-runtime requeues with backoff.
 func (r *ServiceDeploymentReconciler) fail(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, c *components, condType, component string, err error) (ctrl.Result, error) {
 	msg := fmt.Sprintf("%s: %v", component, err)
+	reason := PhaseError
+	if errors.As(err, new(*NotOwnedError)) {
+		reason = ReasonNotOwned
+	}
 	conds := append(c.conds,
-		newCondition(sd, condType, metav1.ConditionFalse, PhaseError, msg),
-		newCondition(sd, CondProvisioned, metav1.ConditionFalse, PhaseError, msg))
+		newCondition(sd, condType, metav1.ConditionFalse, reason, msg),
+		newCondition(sd, CondProvisioned, metav1.ConditionFalse, reason, msg))
 	if serr := r.setStatus(ctx, sd, PhaseError, conds...); serr != nil {
 		return ctrl.Result{}, serr
 	}

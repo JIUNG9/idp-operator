@@ -5,6 +5,12 @@ and may still change.
 
 ## Unreleased
 
+- The operator no longer adopts, overwrites or deletes an object it did not create. An existing
+  ConfigMap, PodDisruptionBudget, NetworkPolicy, Kyverno Policy or ArgoCD Application whose labels
+  lack `managed-by=idp-operator` (or whose owner-namespace is another namespace) is left untouched and
+  the component's condition becomes `False` with reason `NotOwned`. This also covers cleanup deletes
+  (stale PDB, stale platform NetworkPolicy) and teardown of the Application. Previously a same-named
+  object was taken over. See "Ownership rule" in the README
 - `WorkloadsSelected` condition: lists Deployments and StatefulSets in the service namespace and
   reports any whose pod template lacks `app.kubernetes.io/name: <service>`, the label the PDB
   selects on (`LabelMissing`, degraded). `NoWorkloads` until something is delivered. Omitted when
