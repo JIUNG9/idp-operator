@@ -184,10 +184,22 @@ service, not what a compromised pod inside it can reach. Containment is
   counts `http_requests_total` with a `5..` status. If your services do not emit
   that, replace it with `-burn-query`; a query that matches nothing is treated as
   no evidence and fails closed, which is safe but not useful.
-- **Objects named `idp-*` in a provisioned namespace are the operator's.** It
-  will take over and overwrite one that already exists, including one the cache
-  could not see. That is deliberate for guardrails, and worth knowing before you
-  name something `idp-` yourself.
+
+## Ownership rule
+
+The operator writes a ConfigMap (`slo-baseline`), PodDisruptionBudget, NetworkPolicies,
+Kyverno Policy and ArgoCD Application under names it derives from the `ServiceDeployment`.
+It reads the live object, bypassing its label-filtered cache, before every write and every
+cleanup delete. It writes to or deletes an existing object only when both hold:
+
+- `app.kubernetes.io/managed-by` is `idp-operator`;
+- `idp.jiung9.github.io/owner-namespace` is empty (older objects) or equals the
+  `ServiceDeployment`'s namespace.
+
+Otherwise it changes nothing and sets the failing component's condition (and
+`Provisioned`) to `False` with reason `NotOwned`. Delete or relabel the object to proceed.
+On teardown an Application it does not own is left in place and the finalizer is still
+removed. The namespace follows the same rule.
 
 ## The label contract
 
