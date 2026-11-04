@@ -32,8 +32,13 @@ import (
 )
 
 const (
-	// ArgoCDNamespace is where Application objects are written.
+	// ArgoCDNamespace is where Application objects are written unless the
+	// reconciler is configured with another one (-argocd-namespace).
 	ArgoCDNamespace = "argocd"
+
+	// ReasonProjectNotAllowed is the condition reason when spec.gitops.project
+	// is not on the operator's allow-list.
+	ReasonProjectNotAllowed = "ProjectNotAllowed"
 
 	// Finalizer guards garbage collection of the children ownerReferences
 	// can't reach: the cluster-scoped namespace and the Application over in
@@ -116,6 +121,36 @@ type ServiceDeploymentReconciler struct {
 	// ReevaluationInterval is how stale a budget reading may get before it
 	// is taken again. Zero means BudgetReevaluationInterval.
 	ReevaluationInterval time.Duration
+	// AllowedProjects lists the ArgoCD AppProjects a ServiceDeployment may
+	// name. The operator writes Applications with its own privileges, so a
+	// team that could name any project could deploy with the permissions of
+	// the most privileged one. Empty means no project is allowed.
+	AllowedProjects []string
+	// ArgoCDNamespace is where Applications are written. Empty means the
+	// ArgoCDNamespace constant.
+	ArgoCDNamespace string
+}
+
+func (r *ServiceDeploymentReconciler) argocdNamespace() string {
+	if r.ArgoCDNamespace != "" {
+		return r.ArgoCDNamespace
+	}
+	return ArgoCDNamespace
+}
+
+// checkProject rejects a project that is not on the allow-list. The project
+// is compared after defaulting, so an omitted project ("default") is held to
+// the same rule as one written out.
+func (r *ServiceDeploymentReconciler) checkProject(project string) error {
+	for _, p := range r.AllowedProjects {
+		if p == project {
+			return nil
+		}
+	}
+	if len(r.AllowedProjects) == 0 {
+		return fmt.Errorf("spec.gitops.project %q is not allowed: the operator has no allowed projects (set -allowed-projects)", project)
+	}
+	return fmt.Errorf("spec.gitops.project %q is not allowed; allowed projects: %s", project, strings.Join(r.AllowedProjects, ", "))
 }
 
 func (r *ServiceDeploymentReconciler) reevalInterval() time.Duration {
@@ -254,6 +289,10 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// clients that bypass API-server defaulting. Never persisted to spec.
 	sd.Spec.SLO = ApplySLODefaults(sd.Spec.SLO)
 	sd.Spec.GitOps = ApplyGitOpsDefaults(sd.Spec.GitOps)
+	if err := r.checkProject(sd.Spec.GitOps.Project); err != nil {
+		return ctrl.Result{}, r.setStatus(ctx, &sd, PhaseInvalid,
+			newCondition(&sd, CondProvisioned, metav1.ConditionFalse, ReasonProjectNotAllowed, err.Error()))
+	}
 	labels := Labels(&sd)
 	c := &components{sd: &sd}
 
@@ -843,7 +882,7 @@ func (r *ServiceDeploymentReconciler) reconcileApplication(ctx context.Context, 
 	app := &unstructured.Unstructured{}
 	app.SetGroupVersionKind(ApplicationGVK)
 	app.SetName(sd.Name)
-	app.SetNamespace(ArgoCDNamespace)
+	app.SetNamespace(r.argocdNamespace())
 	if err := r.applyManaged(ctx, sd, app, func() error {
 		app.SetLabels(labels)
 		return unstructured.SetNestedMap(app.Object, map[string]any{
@@ -898,7 +937,7 @@ func (r *ServiceDeploymentReconciler) finalize(ctx context.Context, sd *idpv1alp
 	app := &unstructured.Unstructured{}
 	app.SetGroupVersionKind(ApplicationGVK)
 	app.SetName(sd.Name)
-	app.SetNamespace(ArgoCDNamespace)
+	app.SetNamespace(r.argocdNamespace())
 	switch err := r.deleteOwned(ctx, sd, app); {
 	case err == nil:
 	case errors.As(err, new(*NotOwnedError)):

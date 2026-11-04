@@ -247,6 +247,7 @@ func TestBudgetGateSurvivesAnOperatorRestart(t *testing.T) {
 	// is in status. The budget now reads healthy again.
 	restarted := &ServiceDeploymentReconciler{
 		Client: c, BurnSource: budget.StaticSource{Value: 0.95}, ReevaluationInterval: time.Nanosecond,
+		AllowedProjects: []string{"default"},
 	}
 	if _, err := restarted.Reconcile(ctx, req); err != nil {
 		t.Fatal(err)

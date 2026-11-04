@@ -45,6 +45,19 @@ selects on. It is absent for services without a PDB, and reads `NoWorkloads` unt
 workload is delivered. Argo Rollouts are read only when their CRD is installed. Bare Pods (no controller owner) are checked on their own labels. It never
 edits a workload.
 
+## Allowed ArgoCD projects
+
+The operator creates each ArgoCD Application with its own credentials, and the Application's
+`spec.gitops.project` decides which repositories, clusters and namespaces that Application may use.
+If a team could name any project, it could deploy with the permissions of the most privileged one.
+Start the operator with `-allowed-projects=team-apps,sandbox` (comma-separated) and only those
+values are accepted. Matching is exact, an omitted project counts as `default`, and `default` is
+rejected unless you list it. With the flag unset every ServiceDeployment is rejected.
+
+A rejected ServiceDeployment has phase `Invalid` and `Provisioned=False` with reason
+`ProjectNotAllowed`; nothing is created. `-argocd-namespace` (default `argocd`) sets the namespace
+the Applications are written to.
+
 ## Status: early development
 
 This is a young project and says so. What works today:

@@ -63,7 +63,8 @@ func TestEnvtestLifecycle(t *testing.T) {
 			AllowIngressFromNamespaces: []string{"ingress-nginx"},
 			AllowIngressFromCIDRs:      []string{"10.0.0.0/16"},
 		},
-		Policy: PolicyConfig{CosignPublicKey: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----"},
+		AllowedProjects: []string{"default"},
+		Policy:          PolicyConfig{CosignPublicKey: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----"},
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
@@ -274,7 +275,7 @@ func TestEnvtestBudgetGate(t *testing.T) {
 		}
 		r := &ServiceDeploymentReconciler{
 			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(),
-			BurnSource: source, ReevaluationInterval: interval,
+			BurnSource: source, ReevaluationInterval: interval, AllowedProjects: []string{"default"},
 		}
 		if err := r.SetupWithManager(mgr); err != nil {
 			t.Fatal(err)
