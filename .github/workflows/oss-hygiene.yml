@@ -35,7 +35,9 @@ jobs:
           echo "Scanning for employer names outside docs/articles..."
           # The employer list. Update when the author changes employer.
           # Each new job → add the old + new name here AND to docs/OSS_HYGIENE.md.
-          EMPLOYER_PATTERNS='placen|naver|coupang|lotte|hyundai|n-fnb|nowwaiting|dodopoint|whitelabel|connectorder'
+          # The list lives in the OSS_HYGIENE_EMPLOYER_PATTERNS repo secret so it is never public.
+          EMPLOYER_PATTERNS="${{ secrets.OSS_HYGIENE_EMPLOYER_PATTERNS }}"
+          if [ -z "$EMPLOYER_PATTERNS" ]; then echo "::notice::OSS_HYGIENE_EMPLOYER_PATTERNS secret not set, skipping"; exit 0; fi
           MATCHES=$(
             grep -rEil "${EMPLOYER_PATTERNS}" \
               --include='*.py' \
@@ -70,7 +72,8 @@ jobs:
         run: |
           set -e
           echo "Scanning for the author's personal email in code..."
-          EMAIL_PATTERNS='jiung\.gu@|@placen\.co\.kr|@naver\.com|@coupang\.com'
+          EMAIL_PATTERNS="${{ secrets.OSS_HYGIENE_EMAIL_PATTERNS }}"
+          if [ -z "$EMAIL_PATTERNS" ]; then echo "::notice::OSS_HYGIENE_EMAIL_PATTERNS secret not set, skipping"; exit 0; fi
           MATCHES=$(
             grep -rEil "${EMAIL_PATTERNS}" \
               --include='*.py' \
