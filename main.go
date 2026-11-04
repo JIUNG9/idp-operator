@@ -36,6 +36,9 @@ func main() {
 		ingressNamespaces = flag.String("allow-ingress-from-namespaces", "", "comma-separated namespaces allowed to reach services, e.g. the ingress controller's")
 		ingressCIDRs      = flag.String("allow-ingress-from-cidrs", "", "comma-separated CIDRs allowed to reach services, for load balancers that target pod IPs directly")
 
+		allowedProjects = flag.String("allowed-projects", "", "comma-separated ArgoCD AppProjects a ServiceDeployment may name in spec.gitops.project. The operator writes Applications with its own privileges, so list only projects every team may use. Empty rejects every ServiceDeployment")
+		argocdNamespace = flag.String("argocd-namespace", controller.ArgoCDNamespace, "namespace where ArgoCD Applications are written")
+
 		prometheusURL  = flag.String("prometheus-url", "", "Prometheus base URL for error-budget readings. Empty means delivery is not budget-gated at all")
 		burnQuery      = flag.String("burn-query", "", "Go template for the instant query returning a service's error ratio; {{.Namespace}}, {{.Name}} and {{.Window}} are substituted. Defaults to an http_requests_total query")
 		burnTimeout    = flag.Duration("burn-query-timeout", 10*time.Second, "how long to wait for a burn reading before failing closed")
@@ -111,6 +114,10 @@ func main() {
 			"(set -prometheus-url to enable it)")
 	}
 
+	if len(splitList(*allowedProjects)) == 0 {
+		setupLog.Info("no -allowed-projects set; every ServiceDeployment will be rejected until one is listed")
+	}
+
 	scheme := clientgoscheme.Scheme
 	if err := idpv1alpha1.AddToScheme(scheme); err != nil {
 		setupLog.Error(err, "unable to register API types")
@@ -145,6 +152,8 @@ func main() {
 			AllowIngressFromNamespaces: splitList(*ingressNamespaces),
 			AllowIngressFromCIDRs:      splitList(*ingressCIDRs),
 		},
+		AllowedProjects:      splitList(*allowedProjects),
+		ArgoCDNamespace:      *argocdNamespace,
 		Policy:               policyConfig,
 		BurnSource:           burnSource,
 		ReevaluationInterval: *reevalInterval,

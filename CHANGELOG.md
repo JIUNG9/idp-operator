@@ -5,6 +5,15 @@ and may still change.
 
 ## Unreleased
 
+- `spec.gitops.project` is checked against a new `-allowed-projects` flag. The operator writes
+  ArgoCD Applications with its own privileges, so a team that could name any AppProject could deploy
+  with the permissions of the most privileged one. A ServiceDeployment whose project is not listed
+  (an omitted project counts as `default`) gets phase `Invalid`, condition `Provisioned=False` with
+  reason `ProjectNotAllowed`, and no Application is written. The flag has no default: with it unset
+  every ServiceDeployment is rejected, and the operator logs that at startup. `config/manager/manager.yaml`
+  passes `-allowed-projects=default` for the quickstart. New `-argocd-namespace` flag (default
+  `argocd`) sets where Applications are written and deleted.
+
 - The operator no longer adopts, overwrites or deletes an object it did not create. An existing
   ConfigMap, PodDisruptionBudget, NetworkPolicy, Kyverno Policy or ArgoCD Application whose labels
   lack `managed-by=idp-operator` (or whose owner-namespace is another namespace) is left untouched and

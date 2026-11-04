@@ -27,6 +27,11 @@ spec:
         - name: manager
           # Image publishing is wired in M4 (CI); until then build locally.
           image: ghcr.io/jiung9/idp-operator:dev
+          # Every ServiceDeployment is rejected unless its spec.gitops.project is listed.
+          # "default" matches the quickstart; replace it with the AppProjects your teams
+          # may use, and do not list a project that can deploy to other teams' namespaces.
+          args:
+            - -allowed-projects=default
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
