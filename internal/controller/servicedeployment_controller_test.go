@@ -52,7 +52,7 @@ func newFixtureOpts(t *testing.T, sd *idpv1alpha1.ServiceDeployment, mapper apim
 		b = b.WithRESTMapper(mapper)
 	}
 	c := b.Build()
-	r := &ServiceDeploymentReconciler{Client: c}
+	r := &ServiceDeploymentReconciler{Client: c, AllowedProjects: []string{"default"}}
 	if tune != nil {
 		tune(r)
 	}
