@@ -70,11 +70,26 @@ type ServiceDeploymentSpec struct {
 	// +kubebuilder:validation:Enum=prod;staging;dev
 	// +optional
 	Environment string `json:"environment,omitempty"`
+	// DeletionPolicy decides what happens to the service's namespace when
+	// this ServiceDeployment is deleted. Retain (the default) leaves the
+	// namespace, and the workloads and PersistentVolumeClaims in it, in
+	// place; the ArgoCD Application is still deleted. Delete removes the
+	// namespace, which deletes everything inside it.
+	// +kubebuilder:default=Retain
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +optional
+	DeletionPolicy string `json:"deletionPolicy,omitempty"`
 	// +kubebuilder:default={}
 	// +optional
 	SLO    SLO    `json:"slo,omitempty"`
 	GitOps GitOps `json:"gitops"`
 }
+
+// Values of spec.deletionPolicy.
+const (
+	DeletionPolicyRetain = "Retain"
+	DeletionPolicyDelete = "Delete"
+)
 
 // Defaults mirroring the CRD schema, for clients that bypass API-server
 // defaulting (the fake client in tests, mostly).
@@ -82,6 +97,13 @@ const (
 	DefaultReplicas int32 = 1
 	DefaultTier     int32 = 2
 )
+
+// RetainsNamespace reports whether deleting the ServiceDeployment leaves the
+// namespace alone. Anything other than an explicit Delete retains, so an
+// unset field (a client that bypasses API-server defaulting) cannot delete data.
+func (s ServiceDeploymentSpec) RetainsNamespace() bool {
+	return s.DeletionPolicy != DeletionPolicyDelete
+}
 
 // ReplicasOrDefault returns the declared replica count.
 func (s ServiceDeploymentSpec) ReplicasOrDefault() int32 {

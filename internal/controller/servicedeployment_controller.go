@@ -921,8 +921,9 @@ func (r *ServiceDeploymentReconciler) kyvernoAvailable() bool {
 }
 
 // finalize tears down what the golden path provisioned. Deletion order:
-// Application first (it lives outside the namespace cascade), then the
-// namespace, which cascades to everything inside it. Every delete is
+// Application first (it lives outside the namespace cascade), then, only
+// when spec.deletionPolicy is Delete, the namespace, which cascades to
+// everything inside it. Every delete is
 // idempotent — names are derived, never stored — so unwinding a partial
 // provision is safe. The namespace's actual termination is the API server's
 // job; this operator only requires deletion to be initiated.
@@ -958,6 +959,11 @@ func (r *ServiceDeploymentReconciler) finalize(ctx context.Context, sd *idpv1alp
 		// already gone
 	case err != nil:
 		return ctrl.Result{}, err
+	case sd.Spec.RetainsNamespace():
+		// spec.deletionPolicy is Retain (the default): the namespace holds
+		// the team's PVCs, so deleting the CR must not delete the data.
+		log.FromContext(ctx).Info("retaining namespace on teardown: spec.deletionPolicy is Retain",
+			"namespace", sd.Name)
 	case ns.Labels[LabelManagedBy] == ManagedByValue &&
 		(ns.Labels[LabelOwnerNamespace] == "" || ns.Labels[LabelOwnerNamespace] == sd.Namespace):
 		if ns.DeletionTimestamp.IsZero() {

@@ -49,6 +49,14 @@ spec:
             - prod
             - staging
             - dev
+        deletionPolicy:
+          title: When this service is deleted
+          type: string
+          description: Retain keeps the namespace and its PersistentVolumeClaims after the ServiceDeployment is deleted. Delete removes the namespace and everything in it.
+          default: Retain
+          enum:
+            - Retain
+            - Delete
         replicas:
           title: Replicas
           type: integer
@@ -101,6 +109,7 @@ spec:
           team: ${{ parameters.team }}
           tier: ${{ parameters.tier }}
           environment: ${{ parameters.environment }}
+          deletionPolicy: ${{ parameters.deletionPolicy }}
           replicas: ${{ parameters.replicas }}
           availabilityTarget: ${{ parameters.availabilityTarget }}
           latencyP99Ms: ${{ parameters.latencyP99Ms }}
