@@ -29,6 +29,7 @@ var formToCRD = map[string][]string{
 	"team":               {"team"},
 	"tier":               {"tier"},
 	"environment":        {"environment"},
+	"deletionPolicy":     {"deletionPolicy"},
 	"replicas":           {"replicas"},
 	"availabilityTarget": {"slo", "availabilityTarget"},
 	"latencyP99Ms":       {"slo", "latencyP99Ms"},

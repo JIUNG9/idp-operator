@@ -5,6 +5,12 @@ and may still change.
 
 ## Unreleased
 
+- Deleting a ServiceDeployment no longer deletes the team's namespace by default. New
+  `spec.deletionPolicy` (`Retain` or `Delete`, default `Retain`): `Retain` leaves the namespace, its
+  workloads and PersistentVolumeClaims in place and still deletes the ArgoCD Application; `Delete`
+  keeps the old behaviour. Existing objects get `Retain` from the CRD default, so the cascade is now
+  opt-in. The Backstage template has a matching field.
+
 - `spec.gitops.project` is checked against a new `-allowed-projects` flag. The operator writes
   ArgoCD Applications with its own privileges, so a team that could name any AppProject could deploy
   with the permissions of the most privileged one. A ServiceDeployment whose project is not listed

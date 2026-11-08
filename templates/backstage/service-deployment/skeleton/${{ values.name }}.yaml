@@ -8,6 +8,7 @@ spec:
   replicas: ${{ values.replicas }}
   tier: ${{ values.tier }}
   environment: ${{ values.environment }}
+  deletionPolicy: ${{ values.deletionPolicy }}
   slo:
     availabilityTarget: "${{ values.availabilityTarget }}"
     latencyP99Ms: ${{ values.latencyP99Ms }}

@@ -59,6 +59,18 @@ spec:
               ServiceDeploymentSpec is the single manifest a team writes to get a
               namespace, GitOps delivery, and an SLO baseline.
             properties:
+              deletionPolicy:
+                default: Retain
+                description: |-
+                  DeletionPolicy decides what happens to the service's namespace when
+                  this ServiceDeployment is deleted. Retain (the default) leaves the
+                  namespace, and the workloads and PersistentVolumeClaims in it, in
+                  place; the ArgoCD Application is still deleted. Delete removes the
+                  namespace, which deletes everything inside it.
+                enum:
+                - Retain
+                - Delete
+                type: string
               environment:
                 default: prod
                 description: |-

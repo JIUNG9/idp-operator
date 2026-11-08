@@ -214,6 +214,18 @@ Otherwise it changes nothing and sets the failing component's condition (and
 On teardown an Application it does not own is left in place and the finalizer is still
 removed. The namespace follows the same rule.
 
+## Deleting a ServiceDeployment
+
+`spec.deletionPolicy` decides what happens to the namespace:
+
+| Value | On delete |
+|---|---|
+| `Retain` (default) | The namespace, its workloads and its PersistentVolumeClaims stay. The ArgoCD Application is deleted, so ArgoCD stops managing them. |
+| `Delete` | The namespace is deleted, and Kubernetes deletes everything inside it, PVCs included. |
+
+Applying a `ServiceDeployment` with the same name again adopts a retained namespace, because its
+owner label still matches. To remove a retained namespace, run `kubectl delete namespace <name>`.
+
 ## The label contract
 
 The PDB selects workloads by `app.kubernetes.io/name: <service-name>`. The operator

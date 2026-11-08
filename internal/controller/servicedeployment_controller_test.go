@@ -221,6 +221,7 @@ func TestReconcileScaleDownRemovesPDB(t *testing.T) {
 
 func TestReconcileDeleteCleansUp(t *testing.T) {
 	sd := valid()
+	sd.Spec.DeletionPolicy = idpv1alpha1.DeletionPolicyDelete
 	c, r, req := newFixture(t, sd)
 	ctx := context.Background()
 
@@ -247,6 +248,47 @@ func TestReconcileDeleteCleansUp(t *testing.T) {
 	var gone idpv1alpha1.ServiceDeployment
 	if err := c.Get(ctx, types.NamespacedName{Name: sd.Name, Namespace: sd.Namespace}, &gone); err == nil {
 		t.Fatal("finalizer must be removed so the ServiceDeployment goes away")
+	}
+}
+
+// Regression: deleting the CR used to delete the team's namespace, PVCs
+// included. Retain, the default, must leave the namespace and its contents
+// alone, still delete the Application, and still release the finalizer.
+func TestReconcileDeleteRetainsNamespaceByDefault(t *testing.T) {
+	for _, policy := range []string{idpv1alpha1.DeletionPolicyRetain, ""} {
+		t.Run("policy="+policy, func(t *testing.T) {
+			sd := valid()
+			sd.Spec.DeletionPolicy = policy
+			c, r, req := newFixture(t, sd)
+			ctx := context.Background()
+
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("provision: %v", err)
+			}
+			if err := c.Delete(ctx, getSD(t, c, sd.Name, sd.Namespace)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("teardown reconcile: %v", err)
+			}
+
+			var ns corev1.Namespace
+			if err := c.Get(ctx, types.NamespacedName{Name: "orders-api"}, &ns); err != nil {
+				t.Fatalf("namespace must survive teardown under Retain: %v", err)
+			}
+			if !ns.DeletionTimestamp.IsZero() {
+				t.Fatal("namespace must not be terminating under Retain")
+			}
+			app := &unstructured.Unstructured{}
+			app.SetGroupVersionKind(ApplicationGVK)
+			if err := c.Get(ctx, types.NamespacedName{Name: "orders-api", Namespace: ArgoCDNamespace}, app); err == nil {
+				t.Fatal("application must still be deleted under Retain")
+			}
+			var gone idpv1alpha1.ServiceDeployment
+			if err := c.Get(ctx, types.NamespacedName{Name: sd.Name, Namespace: sd.Namespace}, &gone); err == nil {
+				t.Fatal("finalizer must be removed under Retain")
+			}
+		})
 	}
 }
 
