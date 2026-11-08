@@ -107,6 +107,9 @@ func TestEnvtestLifecycle(t *testing.T) {
 	if created.Spec.SLO.AvailabilityTarget != "99.9" || created.Spec.SLO.LatencyP99Ms != 300 {
 		t.Fatalf("CRD schema did not default the SLO: %+v", created.Spec.SLO)
 	}
+	if created.Spec.DeletionPolicy != idpv1alpha1.DeletionPolicyRetain {
+		t.Fatalf("CRD schema must default deletionPolicy to Retain, got %q", created.Spec.DeletionPolicy)
+	}
 	if created.Spec.ReplicasOrDefault() != 1 || created.Spec.GitOps.TargetRevision != "HEAD" {
 		t.Fatalf("CRD schema defaults missing: replicas=%d gitops=%+v", created.Spec.ReplicasOrDefault(), created.Spec.GitOps)
 	}
@@ -189,6 +192,15 @@ func TestEnvtestLifecycle(t *testing.T) {
 	})
 
 	// ---- delete: Application gone, namespace terminating, CR released ----
+	// The default is Retain; opt in to Delete so this test covers the cascade.
+	eventually(t, 10*time.Second, func() error {
+		var cur idpv1alpha1.ServiceDeployment
+		if err := c.Get(ctx, key, &cur); err != nil {
+			return err
+		}
+		cur.Spec.DeletionPolicy = idpv1alpha1.DeletionPolicyDelete
+		return c.Update(ctx, &cur)
+	})
 	if err := c.Delete(ctx, &created); err != nil {
 		t.Fatal(err)
 	}
