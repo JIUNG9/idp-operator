@@ -1,5 +1,7 @@
 # idp-operator
 
+[![ci](https://github.com/JIUNG9/idp-operator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JIUNG9/idp-operator/actions/workflows/ci.yml)
+
 A Kubernetes operator for golden-path service provisioning. One `ServiceDeployment`
 manifest gets a team everything a production service needs on day one:
 
