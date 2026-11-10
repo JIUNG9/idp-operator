@@ -129,10 +129,15 @@ func TestBudgetGateStopsAutomatedSyncWhenBudgetIsLow(t *testing.T) {
 	}
 	got := getSD(t, c, sd.Name, sd.Namespace)
 	// Delivery is still provisioned — it is the automation that stopped, and
-	// the aggregate has to say degraded rather than not-provisioned.
-	agg := apimeta.FindStatusCondition(got.Status.Conditions, CondProvisioned)
-	if agg == nil || agg.Reason != "Degraded" || !strings.Contains(agg.Message, CondBudgetGateReady) {
-		t.Fatalf("aggregate must report the gate as degraded: %+v", agg)
+	// Provisioned stays True; Ready is the condition that goes False.
+	prov := apimeta.FindStatusCondition(got.Status.Conditions, CondProvisioned)
+	if prov == nil || prov.Status != metav1.ConditionTrue || strings.Contains(prov.Message, CondBudgetGateReady) {
+		t.Fatalf("delivery is provisioned, Provisioned must stay True: %+v", prov)
+	}
+	ready := apimeta.FindStatusCondition(got.Status.Conditions, CondReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "Degraded" ||
+		!strings.Contains(ready.Message, CondBudgetGateReady) {
+		t.Fatalf("Ready must be False and name the gate: %+v", ready)
 	}
 	if delivery := apimeta.FindStatusCondition(got.Status.Conditions, CondDeliveryReady); delivery == nil ||
 		!strings.Contains(delivery.Message, "manual sync") {
@@ -514,5 +519,35 @@ func TestBudgetStatusRecordsWhatTheGateBelieved(t *testing.T) {
 	b := getSD(t, c, sd.Name, sd.Namespace).Status.Budget
 	if b.Environment != "dev" || b.Tier != 1 {
 		t.Fatalf("the gate must record the inputs that weakened it: %+v", b)
+	}
+}
+
+func TestStandingVerdictMessageDoesNotDependOnElapsedTime(t *testing.T) {
+	// A message with "N seconds ago" in it changes on every reconcile, so
+	// every reconcile writes status, which wakes the controller again.
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, nil, func(r *ServiceDeploymentReconciler) {
+		r.BurnSource = budget.StaticSource{Value: 0}
+		r.ReevaluationInterval = time.Hour
+	})
+	ctx := context.Background()
+	for range 2 { // the first reading, then a standing verdict
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := budgetCond(t, c, sd).Message
+
+	got := getSD(t, c, sd.Name, sd.Namespace)
+	aged := metav1.NewTime(got.Status.Budget.LastEvaluationTime.Add(-30 * time.Minute))
+	got.Status.Budget.LastEvaluationTime = &aged
+	if err := c.Status().Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if second := budgetCond(t, c, sd).Message; second != first {
+		t.Fatalf("message changed with the age of the reading:\n%q\n%q", first, second)
 	}
 }

@@ -22,10 +22,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
 	"github.com/JIUNG9/idp-operator/internal/budget"
@@ -84,6 +87,7 @@ const (
 
 	// Condition types. One per provisioned component, plus the aggregate.
 	CondProvisioned          = "Provisioned"
+	CondReady                = "Ready"
 	CondNamespaceReady       = "NamespaceReady"
 	CondSLOReady             = "SLOReady"
 	CondPDBReady             = "PDBReady"
@@ -222,30 +226,35 @@ func (c *components) degrade(condType, reason, message string) {
 	c.degraded = append(c.degraded, condType)
 }
 
+// aggregate returns the Provisioned condition: do the objects exist. A
+// degraded component (the budget gate holding delivery back) was provisioned,
+// so it does not change this condition; Ready carries that.
 func (c *components) aggregate() metav1.Condition {
-	var parts []string
-	if len(c.skipped) > 0 {
-		parts = append(parts, "not provisioned: "+strings.Join(c.skipped, ", "))
-	}
-	if len(c.degraded) > 0 {
-		parts = append(parts, "degraded: "+strings.Join(c.degraded, ", "))
-	}
-	if len(parts) == 0 {
+	if len(c.skipped) == 0 {
 		return newCondition(c.sd, CondProvisioned, metav1.ConditionTrue,
 			"Reconciled", "golden path provisioned")
 	}
 	// Still True: everything this spec and this cluster allow was provisioned.
-	// The reason names what was not, so degradation is never silent.
-	reason := "ReconciledWithSkips"
-	if len(c.degraded) > 0 {
-		reason = "Degraded"
+	// The reason names what was not, so a skip is never silent.
+	return newCondition(c.sd, CondProvisioned, metav1.ConditionTrue, "ReconciledWithSkips",
+		"golden path provisioned; not provisioned: "+strings.Join(c.skipped, ", "))
+}
+
+// readyCondition returns the Ready condition: is everything provisioned also working.
+// It is False while a component is degraded, so `kubectl wait --for=condition=Ready`
+// does not pass while the budget gate is holding delivery back. Deliberate
+// skips do not count against it.
+func (c *components) readyCondition() metav1.Condition {
+	if len(c.degraded) == 0 {
+		return newCondition(c.sd, CondReady, metav1.ConditionTrue, "AllComponentsOperative",
+			"every provisioned component is operative")
 	}
-	return newCondition(c.sd, CondProvisioned, metav1.ConditionTrue, reason,
-		"golden path provisioned; "+strings.Join(parts, "; "))
+	return newCondition(c.sd, CondReady, metav1.ConditionFalse, "Degraded",
+		"degraded: "+strings.Join(c.degraded, ", "))
 }
 
 func (c *components) all() []metav1.Condition {
-	return append(c.conds, c.aggregate())
+	return append(c.conds, c.aggregate(), c.readyCondition())
 }
 
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments,verbs=get;list;watch;update;patch
@@ -282,7 +291,8 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	if err := Validate(&sd); err != nil {
 		return ctrl.Result{}, r.setStatus(ctx, &sd, PhaseInvalid,
-			newCondition(&sd, CondProvisioned, metav1.ConditionFalse, PhaseInvalid, err.Error()))
+			newCondition(&sd, CondProvisioned, metav1.ConditionFalse, PhaseInvalid, err.Error()),
+			newCondition(&sd, CondReady, metav1.ConditionFalse, PhaseInvalid, err.Error()))
 	}
 
 	// The CRD schema is the authoritative defaulter; this repeats it for
@@ -291,7 +301,8 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	sd.Spec.GitOps = ApplyGitOpsDefaults(sd.Spec.GitOps)
 	if err := r.checkProject(sd.Spec.GitOps.Project); err != nil {
 		return ctrl.Result{}, r.setStatus(ctx, &sd, PhaseInvalid,
-			newCondition(&sd, CondProvisioned, metav1.ConditionFalse, ReasonProjectNotAllowed, err.Error()))
+			newCondition(&sd, CondProvisioned, metav1.ConditionFalse, ReasonProjectNotAllowed, err.Error()),
+			newCondition(&sd, CondReady, metav1.ConditionFalse, ReasonProjectNotAllowed, err.Error()))
 	}
 	labels := Labels(&sd)
 	c := &components{sd: &sd}
@@ -724,8 +735,8 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 			c.requeue(interval - age)
 			held := budget.Verdict(prev.Verdict)
 			c.budgetCondition(held, fmt.Sprintf(
-				"standing verdict %q from a reading %s ago (%d%% of the budget left, via %s)",
-				held, age.Round(time.Second), prev.RemainingPercent, prev.Source))
+				"standing verdict %q (%d%% of the budget left at the last reading, via %s)",
+				held, prev.RemainingPercent, prev.Source))
 			return held, nil
 		}
 	}
@@ -1004,7 +1015,8 @@ func (r *ServiceDeploymentReconciler) fail(ctx context.Context, sd *idpv1alpha1.
 	}
 	conds := append(c.conds,
 		newCondition(sd, condType, metav1.ConditionFalse, reason, msg),
-		newCondition(sd, CondProvisioned, metav1.ConditionFalse, reason, msg))
+		newCondition(sd, CondProvisioned, metav1.ConditionFalse, reason, msg),
+		newCondition(sd, CondReady, metav1.ConditionFalse, reason, msg))
 	if serr := r.setStatus(ctx, sd, PhaseError, conds...); serr != nil {
 		return ctrl.Result{}, serr
 	}
@@ -1067,10 +1079,26 @@ func mapProvisioned(_ context.Context, obj client.Object) []ctrl.Request {
 	return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: name, Namespace: owner}}}
 }
 
+// specOrDeletionChanged lets a ServiceDeployment event through when the spec
+// changed (metadata.generation moves) or deletion started. Status writes and
+// finalizer edits do not move the generation. Create and delete events always
+// pass, which is what the generation predicate does by default.
+func specOrDeletionChanged() predicate.Predicate {
+	return predicate.Or(
+		predicate.GenerationChangedPredicate{},
+		predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectOld.GetDeletionTimestamp().IsZero() != e.ObjectNew.GetDeletionTimestamp().IsZero()
+		}},
+	)
+}
+
 // SetupWithManager wires the reconciler into the manager.
 func (r *ServiceDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&idpv1alpha1.ServiceDeployment{}).
+		// Spec edits and deletion only. Our own status writes would otherwise
+		// queue another reconcile each time; the requeue timers cover the
+		// time-driven work.
+		For(&idpv1alpha1.ServiceDeployment{}, builder.WithPredicates(specOrDeletionChanged())).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
 		Watches(&policyv1.PodDisruptionBudget{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).

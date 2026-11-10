@@ -37,9 +37,10 @@ Teams that use Backstage can fill in a form instead: see [Backstage template](#b
 
 Every component reports its own status condition — `NamespaceReady`, `SLOReady`,
 `PDBReady`, `NetworkPolicyReady`, `AdmissionPolicyReady`, `BudgetGateReady`,
-`DeliveryReady`, `WorkloadsSelected` — and the aggregate `Provisioned` condition names anything that was
-skipped or is degraded. A guardrail that isn't there says so; it never reads as
-healthy.
+`DeliveryReady`, `WorkloadsSelected` — plus two aggregates. `Provisioned` is `True` when the objects exist and
+names anything that was skipped. `Ready` is `False` with reason `Degraded` while a provisioned component is not
+operative, for example when the budget gate has stopped automated sync. A guardrail that isn't there says so; it
+never reads as healthy.
 
 `WorkloadsSelected` reads the Deployments, StatefulSets, Argo Rollouts and bare Pods in the service namespace and
 reports any whose pod template (or, for a Pod, labels) lacks `app.kubernetes.io/name: <service>`, the label the PDB
@@ -56,7 +57,7 @@ Start the operator with `-allowed-projects=team-apps,sandbox` (comma-separated) 
 values are accepted. Matching is exact, an omitted project counts as `default`, and `default` is
 rejected unless you list it. With the flag unset every ServiceDeployment is rejected.
 
-A rejected ServiceDeployment has phase `Invalid` and `Provisioned=False` with reason
+A rejected ServiceDeployment has phase `Invalid` and `Provisioned=False` and `Ready=False` with reason
 `ProjectNotAllowed`; nothing is created. `-argocd-namespace` (default `argocd`) sets the namespace
 the Applications are written to.
 
