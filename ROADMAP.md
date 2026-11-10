@@ -127,9 +127,9 @@ time, which also stops the operator querying Prometheus once per event.
       baseline actually **rejects** a privileged pod, and the PDB really selects a
       correctly labelled workload. It also asserts an ordinary pod is still admitted,
       because a baseline that fails every normal manifest gets switched off.
-- [x] CI: build, vet, gofmt, generated-output-in-sync, unit + envtest; e2e on demand
-      (PR label `e2e` or manual dispatch, since it builds an image and stands up a
-      cluster)
+- [x] CI: build, vet, gofmt, generated-output-in-sync, unit + envtest; the kind e2e runs on
+      pushes to main and nightly (on a PR only with the `e2e` label, since it builds an image
+      and stands up a cluster)
 - [x] OSS hygiene workflow + `docs/OSS_HYGIENE.md`, from the shared template
 - [x] Example gallery: minimal, full-spec, budget-gated
 - [ ] Demo GIF
