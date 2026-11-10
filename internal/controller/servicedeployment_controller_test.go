@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
 )
@@ -466,6 +467,10 @@ func TestReconcileSkipsAdmissionPolicyWithoutKyverno(t *testing.T) {
 	if !strings.Contains(agg.Message, CondAdmissionPolicyReady) {
 		t.Fatalf("aggregate must name what was skipped: %q", agg.Message)
 	}
+	// A skip the spec or cluster asked for is not a degradation.
+	if ready := apimeta.FindStatusCondition(got.Status.Conditions, CondReady); ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("a skipped component must not turn Ready False: %+v", ready)
+	}
 }
 
 func TestReconcileProvisionsAdmissionPolicy(t *testing.T) {
@@ -547,7 +552,7 @@ func TestReconcileReportsEveryComponent(t *testing.T) {
 	got := getSD(t, c, sd.Name, sd.Namespace)
 	for _, condType := range []string{
 		CondNamespaceReady, CondSLOReady, CondPDBReady,
-		CondNetworkPolicyReady, CondAdmissionPolicyReady, CondDeliveryReady, CondProvisioned,
+		CondNetworkPolicyReady, CondAdmissionPolicyReady, CondDeliveryReady, CondProvisioned, CondReady,
 	} {
 		cond := apimeta.FindStatusCondition(got.Status.Conditions, condType)
 		if cond == nil {
@@ -780,5 +785,33 @@ func TestWorkloadsSelectedIsOmittedWithoutAPDB(t *testing.T) {
 	got := getSD(t, c, sd.Name, sd.Namespace)
 	if cond := apimeta.FindStatusCondition(got.Status.Conditions, CondWorkloadsSelected); cond != nil {
 		t.Fatalf("no PDB, nothing to select; condition should be absent: %+v", cond)
+	}
+}
+
+func TestSpecOrDeletionChangedFiltersStatusWrites(t *testing.T) {
+	p := specOrDeletionChanged()
+	base := valid()
+	base.Generation = 1
+
+	statusOnly := base.DeepCopy()
+	statusOnly.Status.Phase = PhaseProvisioned
+	if p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: statusOnly}) {
+		t.Fatal("a status write must not queue a reconcile")
+	}
+
+	specEdit := base.DeepCopy()
+	specEdit.Generation = 2
+	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: specEdit}) {
+		t.Fatal("a spec edit must queue a reconcile")
+	}
+
+	now := metav1.Now()
+	deleting := base.DeepCopy()
+	deleting.DeletionTimestamp = &now
+	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: deleting}) {
+		t.Fatal("the start of deletion must queue a reconcile")
+	}
+	if !p.Create(event.CreateEvent{Object: base}) {
+		t.Fatal("a new object must queue a reconcile")
 	}
 }

@@ -5,6 +5,15 @@ and may still change.
 
 ## Unreleased
 
+- The controller no longer reconciles on its own status writes. The `ServiceDeployment` watch passes
+  spec changes (generation), the start of deletion and creates; the requeue timers still drive the
+  budget gate and the Kyverno retry. The standing-verdict message on `BudgetGateReady` no longer
+  contains the age of the reading ("5s ago"), which changed on every reconcile and forced a status
+  write each time. New `Ready` condition: `False` with reason `Degraded` while a provisioned component
+  is not operative (the budget gate holding delivery). `Provisioned` keeps meaning "the objects exist",
+  so its reason is no longer `Degraded`; it is `Reconciled` or `ReconciledWithSkips`. Deliberate skips
+  do not turn `Ready` false.
+
 - Deleting a ServiceDeployment no longer deletes the team's namespace by default. New
   `spec.deletionPolicy` (`Retain` or `Delete`, default `Retain`): `Retain` leaves the namespace, its
   workloads and PersistentVolumeClaims in place and still deletes the ArgoCD Application; `Delete`
