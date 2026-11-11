@@ -155,6 +155,14 @@ operator flags, not spec fields:
 | `-budget-reevaluation-interval` | How stale a reading may get, and the pace of the anti-flapping rule (default 5m) |
 | `-static-budget` | A fixed budget fraction instead of Prometheus. Demos and testing only |
 
+Process flags:
+
+| Flag | What it does |
+| --- | --- |
+| `-leader-elect` | Elect a leader through a `coordination.k8s.io` Lease in the operator's namespace so one replica reconciles at a time. Default off; `config/manager/manager.yaml` turns it on and ships the Role for the Lease |
+| `-metrics-bind-address` | Prometheus metrics endpoint (default `:8080`, plain HTTP, `0` disables). Restrict it with a NetworkPolicy |
+| `-health-probe-bind-address` | `/healthz` and `/readyz` (default `:8081`, `0` disables). Both report that the process is up; a standby replica is ready |
+
 Without a signing identity the workload rules still ship and the status condition
 says plainly that signatures are **not** verified.
 

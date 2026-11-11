@@ -5,6 +5,15 @@ and may still change.
 
 ## Unreleased
 
+- The operator now has leader election, health probes and a metrics endpoint. New flags:
+  `-leader-elect` (default off), `-metrics-bind-address` (default `:8080`) and
+  `-health-probe-bind-address` (default `:8081`, serves `/healthz` and `/readyz`).
+  `config/manager/manager.yaml` passes `-leader-elect`, exposes both ports and adds liveness and
+  readiness probes. New `config/rbac/leader_election_role.yaml` grants the Lease and event
+  permissions in `idp-system`; the kustomization includes it. Before this, a second replica would
+  have reconciled in parallel, and a hung process was not restarted. `/readyz` is a ping check, so it
+  does not yet report whether the cache has synced.
+
 - The controller no longer reconciles on its own status writes. The `ServiceDeployment` watch passes
   spec changes (generation), the start of deletion and creates; the requeue timers still drive the
   budget gate and the Kyverno retry. The standing-verdict message on `BudgetGateReady` no longer
