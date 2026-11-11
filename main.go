@@ -16,7 +16,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
 	"github.com/JIUNG9/idp-operator/internal/budget"
@@ -39,11 +41,14 @@ func main() {
 		allowedProjects = flag.String("allowed-projects", "", "comma-separated ArgoCD AppProjects a ServiceDeployment may name in spec.gitops.project. The operator writes Applications with its own privileges, so list only projects every team may use. Empty rejects every ServiceDeployment")
 		argocdNamespace = flag.String("argocd-namespace", controller.ArgoCDNamespace, "namespace where ArgoCD Applications are written")
 
-		prometheusURL  = flag.String("prometheus-url", "", "Prometheus base URL for error-budget readings. Empty means delivery is not budget-gated at all")
-		burnQuery      = flag.String("burn-query", "", "Go template for the instant query returning a service's error ratio; {{.Namespace}}, {{.Name}} and {{.Window}} are substituted. Defaults to an http_requests_total query")
-		burnTimeout    = flag.Duration("burn-query-timeout", 10*time.Second, "how long to wait for a burn reading before failing closed")
-		staticBudget   = flag.Float64("static-budget", -1, "fixed error budget fraction in [0,1] instead of querying Prometheus. For demos and testing only")
-		reevalInterval = flag.Duration("budget-reevaluation-interval", 5*time.Minute, "how stale a budget reading may get before it is taken again. Also paces the anti-flapping rule, which counts readings, not reconciles")
+		prometheusURL   = flag.String("prometheus-url", "", "Prometheus base URL for error-budget readings. Empty means delivery is not budget-gated at all")
+		burnQuery       = flag.String("burn-query", "", "Go template for the instant query returning a service's error ratio; {{.Namespace}}, {{.Name}} and {{.Window}} are substituted. Defaults to an http_requests_total query")
+		burnTimeout     = flag.Duration("burn-query-timeout", 10*time.Second, "how long to wait for a burn reading before failing closed")
+		staticBudget    = flag.Float64("static-budget", -1, "fixed error budget fraction in [0,1] instead of querying Prometheus. For demos and testing only")
+		leaderElect     = flag.Bool("leader-elect", false, "elect a leader through a coordination.k8s.io Lease so only one replica reconciles. Enable it whenever replicas > 1; config/manager/manager.yaml sets it")
+		metricsAddr     = flag.String("metrics-bind-address", ":8080", "address the Prometheus metrics endpoint listens on; \"0\" disables it. Plain HTTP, so restrict it with a NetworkPolicy")
+		healthProbeAddr = flag.String("health-probe-bind-address", ":8081", "address the /healthz and /readyz endpoints listen on; \"0\" disables them")
+		reevalInterval  = flag.Duration("budget-reevaluation-interval", 5*time.Minute, "how stale a budget reading may get before it is taken again. Also paces the anti-flapping rule, which counts readings, not reconciles")
 	)
 	flag.Parse()
 
@@ -127,17 +132,17 @@ func main() {
 	// The drift watches are label-mapped, so the cache only needs the
 	// objects this operator stamped — not every ConfigMap in the cluster.
 	managed := labels.SelectorFromSet(labels.Set{controller.LabelManagedBy: controller.ManagedByValue})
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Namespace{}:             {Label: managed},
-				&corev1.ConfigMap{}:             {Label: managed},
-				&policyv1.PodDisruptionBudget{}: {Label: managed},
-				&networkingv1.NetworkPolicy{}:   {Label: managed},
-			},
+	opts := managerOptions(*leaderElect, *metricsAddr, *healthProbeAddr)
+	opts.Scheme = scheme
+	opts.Cache = cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Namespace{}:             {Label: managed},
+			&corev1.ConfigMap{}:             {Label: managed},
+			&policyv1.PodDisruptionBudget{}: {Label: managed},
+			&networkingv1.NetworkPolicy{}:   {Label: managed},
 		},
-	})
+	}
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -162,10 +167,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	// healthz means the process is alive. readyz also passes only while the
+	// manager is serving; with leader election on, a
+	// standby replica is still ready, because readiness must not depend on
+	// holding the lease.
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up the health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up the ready check")
+		os.Exit(1)
+	}
+
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager exited")
 		os.Exit(1)
+	}
+}
+
+// managerOptions holds the process-level wiring that does not depend on the
+// cluster: leader election, metrics and probe endpoints.
+func managerOptions(leaderElect bool, metricsAddr, healthProbeAddr string) ctrl.Options {
+	return ctrl.Options{
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress: healthProbeAddr,
+		LeaderElection:         leaderElect,
+		LeaderElectionID:       "idp-operator.idp.jiung9.github.io",
+		// Release the Lease on a clean shutdown so a rolling update does not
+		// wait out the lease duration before the new pod reconciles.
+		LeaderElectionReleaseOnCancel: true,
 	}
 }
 

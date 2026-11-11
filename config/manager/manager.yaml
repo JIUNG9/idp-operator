@@ -32,6 +32,25 @@ spec:
           # may use, and do not list a project that can deploy to other teams' namespaces.
           args:
             - -allowed-projects=default
+            # Only one replica reconciles at a time; the others wait on the Lease.
+            - -leader-elect
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
