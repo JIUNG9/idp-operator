@@ -2,21 +2,24 @@
 
 [![ci](https://github.com/JIUNG9/idp-operator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JIUNG9/idp-operator/actions/workflows/ci.yml)
 
-A Kubernetes operator for golden-path service provisioning. One `ServiceDeployment`
-manifest gets a team everything a production service needs on day one:
+A Kubernetes operator that decides, per service, whether ArgoCD may sync automatically,
+based on the service's remaining error budget. It reads the budget from Prometheus and
+turns automated sync off when the budget is low. Sync stays on while the budget is
+healthy, so delivery from Git is not slowed down. See [Budget-aware delivery](#budget-aware-delivery).
+
+The gate sits on top of a golden-path provisioner. One `ServiceDeployment` manifest
+creates what a production service needs on day one:
 
 - a **namespace**, labeled with ownership
-- an **SLO baseline** — a machine-readable reliability contract (`99.9%` availability,
-  `300ms` p99 by default; silence is not an opt-out)
-- a **PodDisruptionBudget** derived from the declared replicas, so disruption safety
-  is the default, not a request (single-replica services get an honest status condition
-  instead of a drain-blocking fake PDB)
-- **NetworkPolicies** that deny ingress by default and re-admit only the namespace
+- an **SLO baseline**, a machine-readable reliability contract (`99.9%` availability,
+  `300ms` p99 by default; the SLO cannot be left out)
+- a **PodDisruptionBudget** derived from the declared replicas (single-replica services
+  get a status condition instead of a PDB that would block node drains)
+- **NetworkPolicies** that deny ingress by default and allow only the namespace
   itself and the platform's declared ingress path
 - a **Kyverno baseline** rejecting privileged pods and host namespaces, and verifying
   image signatures when the platform has a signing identity configured
-- an **ArgoCD Application** — delivery is Git-to-production from the first commit,
-  for exactly as long as the service's error budget can afford it
+- an **ArgoCD Application** whose automated sync is controlled by the budget gate
 
 ```yaml
 apiVersion: idp.jiung9.github.io/v1alpha1
@@ -35,12 +38,11 @@ That's the whole onboarding. See `examples/orders-api.yaml` for the full shape.
 
 Teams that use Backstage can fill in a form instead: see [Backstage template](#backstage-template).
 
-Every component reports its own status condition — `NamespaceReady`, `SLOReady`,
+Every component reports its own status condition: `NamespaceReady`, `SLOReady`,
 `PDBReady`, `NetworkPolicyReady`, `AdmissionPolicyReady`, `BudgetGateReady`,
-`DeliveryReady`, `WorkloadsSelected` — plus two aggregates. `Provisioned` is `True` when the objects exist and
+`DeliveryReady`, `WorkloadsSelected`, plus two aggregates. `Provisioned` is `True` when the objects exist and
 names anything that was skipped. `Ready` is `False` with reason `Degraded` while a provisioned component is not
-operative, for example when the budget gate has stopped automated sync. A guardrail that isn't there says so; it
-never reads as healthy.
+operative, for example when the budget gate has stopped automated sync. A missing guardrail is reported in the status and never reads as healthy.
 
 `WorkloadsSelected` reads the Deployments, StatefulSets, Argo Rollouts and bare Pods in the service namespace and
 reports any whose pod template (or, for a Pod, labels) lacks `app.kubernetes.io/name: <service>`, the label the PDB
