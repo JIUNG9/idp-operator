@@ -67,14 +67,10 @@ const (
 	// reading the operator can no longer refresh, as a multiple of the
 	// re-evaluation interval.
 	//
-	// Holding the last verdict through a brief outage is right: a Prometheus
-	// restart is not a reliability event, and turning every scrape blip into
-	// a delivery freeze would teach people to rip the gate out. Holding it
-	// indefinitely is wrong for a reason that matters more: monitoring tends
-	// to fail *with* the things it monitors, so an unbounded hold keeps
-	// unattended delivery running exactly through the incident where nobody
-	// can see the budget. After the grace period, an unreadable budget is
-	// treated as what it is — no evidence — and the gate tightens.
+	// Holding the last verdict covers a brief Prometheus outage. The hold is
+	// bounded because monitoring can fail together with the service, and an
+	// unbounded hold would leave delivery unattended during that incident.
+	// After the grace period the gate tightens.
 	StaleVerdictGraceMultiple = 3
 
 	// Phases. Provisioned means the golden-path objects exist and match
@@ -718,15 +714,10 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 	interval := r.reevalInterval()
 	prev := sd.Status.Budget
 
-	// A verdict is only re-derived when its reading has gone stale.
-	//
-	// This is load-bearing, not an optimisation. Writing status triggers a
-	// watch event, which triggers another reconcile, so a reconcile-counting
-	// anti-flapping rule burns its whole streak in milliseconds and relaxes
-	// the gate almost the moment the budget looks better — the exact
-	// behaviour the rule exists to prevent. Tying re-evaluation to elapsed
-	// time makes "three consecutive readings" mean three points in time.
-	// It also keeps the operator from hammering Prometheus once per event.
+	// Re-derive the verdict only when its reading is stale. Status writes
+	// trigger reconciles, so counting reconciles would use up the loosening
+	// streak in milliseconds. Elapsed time makes "three readings" mean three
+	// points in time and avoids querying Prometheus once per event.
 	if prev != nil && prev.Verdict != "" && prev.LastEvaluationTime != nil {
 		// A negative age means the stored timestamp is in the future — clock
 		// skew, or a hand-edited status. Either way it is not something to
@@ -754,13 +745,9 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 		Window:             ErrorBudgetWindow,
 	})
 	if err != nil {
-		// Fail closed, with a bounded grace period. A source that cannot be
-		// read is not evidence of a healthy budget. The last verdict stands
-		// while it is still recent — a Prometheus restart is not a
-		// reliability event — but only until the grace period runs out,
-		// because monitoring fails alongside the things it monitors and an
-		// unbounded hold would keep delivery unattended through exactly the
-		// incident nobody can see.
+		// Fail closed with a bounded grace period. An unreadable source is not
+		// a healthy budget. The last verdict stands until the grace period
+		// ends, then the gate tightens to require-human.
 		held, expired := budget.RequireHuman, true
 		if prev != nil && prev.Verdict != "" {
 			held = budget.Verdict(prev.Verdict)
