@@ -535,8 +535,8 @@ func (r *ServiceDeploymentReconciler) reconcilePDB(ctx context.Context, sd *idpv
 // reconcileWorkloadSelection checks that the workloads delivered into the
 // service namespace carry the label the PDB selects on. The workload comes
 // from the team's GitOps repo, so a missing label leaves a PDB that selects
-// nothing. Argo Rollouts are read when their CRD is installed. Bare Pods (no controller owner) are checked on their own labels;
-// pods a controller owns are covered through its template. It only reads: it never edits a workload it does not own. With no
+// nothing. Argo Rollouts are read when their CRD is installed. Bare Pods and the live pods of ReplicaSets and
+// StatefulSets are checked on their own labels as well as through the template. It only reads: it never edits a workload it does not own. With no
 // PDB there is nothing to select, so no condition is reported.
 func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, c *components) error {
 	if !PDBWanted(sd.Spec.ReplicasOrDefault()) {
@@ -569,8 +569,7 @@ func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Con
 		workloads = append(workloads, Workload{"StatefulSet", s.Name, s.Spec.Template.Labels})
 	}
 	for _, p := range pods.Items {
-		// A pod with a controller is covered through its owner's template.
-		if metav1.GetControllerOf(&p) == nil {
+		if podChecked(&p) {
 			workloads = append(workloads, Workload{"Pod", p.Name, p.Labels})
 		}
 	}
@@ -581,13 +580,33 @@ func (r *ServiceDeploymentReconciler) reconcileWorkloadSelection(ctx context.Con
 		return nil
 	}
 	if bad := UnselectedWorkloads(sd.Name, workloads); len(bad) > 0 {
+		if len(bad) > maxNamedWorkloads {
+			bad = append(bad[:maxNamedWorkloads:maxNamedWorkloads], fmt.Sprintf("and %d more", len(bad)-maxNamedWorkloads))
+		}
 		c.degrade(CondWorkloadsSelected, "LabelMissing", fmt.Sprintf(
-			"pod template lacks %s=%s, so the PDB does not select: %s", LabelName, sd.Name, strings.Join(bad, ", ")))
+			"%s=%s is missing from the pod labels, so the PDB does not select: %s", LabelName, sd.Name, strings.Join(bad, ", ")))
 		c.requeue(EnvironmentalRetryInterval)
 		return nil
 	}
 	c.ready(CondWorkloadsSelected, "Selected", fmt.Sprintf("%d workload(s) carry %s=%s", len(workloads), LabelName, sd.Name))
 	return nil
+}
+
+// maxNamedWorkloads caps how many workload names a condition message lists.
+const maxNamedWorkloads = 5
+
+// podChecked says whether a pod's own labels are judged against the PDB
+// selector. Bare pods are. Pods a ReplicaSet or StatefulSet owns are too: a
+// pod created before the template was fixed keeps its old labels until it is
+// replaced, and the PDB only sees labels on the pod itself. Pods owned by
+// anything else (Jobs, DaemonSets, other controllers) are not the PDB's
+// concern. Finished and terminating pods are ignored.
+func podChecked(p *corev1.Pod) bool {
+	if p.DeletionTimestamp != nil || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		return false
+	}
+	owner := metav1.GetControllerOf(p)
+	return owner == nil || owner.Kind == "ReplicaSet" || owner.Kind == "StatefulSet"
 }
 
 // listRollouts returns the Argo Rollouts in the namespace as workloads, read

@@ -5,6 +5,12 @@ and may still change.
 
 ## Unreleased
 
+- `WorkloadsSelected` now also checks the labels of running pods owned by a ReplicaSet or StatefulSet.
+  Before, it read only the pod template, so a pod created before the template was fixed kept its old
+  labels, stayed outside the PDB, and the condition read `True`. The condition now reads `LabelMissing`
+  until that pod is replaced. Pods owned by Jobs or other controllers and pods that finished or are
+  terminating are skipped. The message names at most 5 workloads and says "and N more" after that, and
+  it now reads "is missing from the pod labels" (was "pod template lacks").
 - The operator now has leader election, health probes and a metrics endpoint. New flags:
   `-leader-elect` (default off), `-metrics-bind-address` (default `:8080`) and
   `-health-probe-bind-address` (default `:8081`, serves `/healthz` and `/readyz`).

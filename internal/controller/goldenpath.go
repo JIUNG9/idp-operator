@@ -120,7 +120,7 @@ func PDBSkipReason(replicas int32) (reason, message string) {
 	return "SingleReplicaUnprotected", "a single replica cannot be disruption-safe; set spec.replicas to 2 or more for a PDB"
 }
 
-// UnselectedWorkloads names the workloads whose pod template does not carry
+// UnselectedWorkloads names the workloads whose pod labels do not carry
 // the label the PDB selects on (LabelName=service). Such a workload is
 // invisible to the PDB: its pods can all be evicted at once while the PDB
 // reports healthy. Names are returned as "Kind/name", in input order.
@@ -134,7 +134,7 @@ func UnselectedWorkloads(service string, workloads []Workload) []string {
 	return out
 }
 
-// Workload is the part of a Deployment, StatefulSet or bare Pod the label check reads.
+// Workload is the part of a Deployment, StatefulSet, Rollout or Pod the label check reads.
 // For a Pod, PodLabels are its own labels.
 type Workload struct {
 	Kind, Name string

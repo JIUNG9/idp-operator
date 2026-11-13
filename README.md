@@ -46,8 +46,8 @@ operative, for example when the budget gate has stopped automated sync. A missin
 
 `WorkloadsSelected` reads the Deployments, StatefulSets, Argo Rollouts and bare Pods in the service namespace and
 reports any whose pod template (or, for a Pod, labels) lacks `app.kubernetes.io/name: <service>`, the label the PDB
-selects on. It is absent for services without a PDB, and reads `NoWorkloads` until the first
-workload is delivered. Argo Rollouts are read only when their CRD is installed. Bare Pods (no controller owner) are checked on their own labels. It never
+selects on. It also checks the labels of the running pods that ReplicaSets and StatefulSets created, so a pod made before the template was fixed is reported until it is replaced. It is absent for services without a PDB, and reads `NoWorkloads` until the first
+workload is delivered. Argo Rollouts are read only when their CRD is installed. Pods owned by Jobs, DaemonSets or other controllers, and pods that finished or are terminating, are not checked. A message names at most 5 workloads. It never
 edits a workload.
 
 ## Allowed ArgoCD projects
