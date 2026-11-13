@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -652,6 +653,14 @@ func barePod(name string, labels map[string]string, owned bool) *corev1.Pod {
 	return p
 }
 
+// ownedPod builds a pod whose controller owner has the given kind.
+func ownedPod(name string, labels map[string]string, ownerKind string, phase corev1.PodPhase) *corev1.Pod {
+	p := barePod(name, labels, true)
+	p.OwnerReferences[0].Kind = ownerKind
+	p.Status.Phase = phase
+	return p
+}
+
 // rollout builds an Argo Rollout as unstructured, the way the operator reads it.
 func rollout(name string, templateLabels map[string]any) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{Object: map[string]any{
@@ -686,10 +695,25 @@ func TestWorkloadsSelectedCondition(t *testing.T) {
 			3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
 		{"unlabelled bare pod", []client.Object{barePod("debug", map[string]string{"app": "x"}, false)},
 			3, metav1.ConditionFalse, "LabelMissing", "Pod/debug", true},
-		{"pod owned by a controller is judged by its owner's template", []client.Object{
+		{"labelled pod of a replicaset passes", []client.Object{
 			deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}),
-			barePod("api-abc", nil, true),
+			barePod("api-abc", map[string]string{LabelName: "orders-api"}, true),
+		}, 3, metav1.ConditionTrue, "Selected", "2 workload(s)", false},
+		{"running pod made before the template was fixed", []client.Object{
+			deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}),
+			barePod("api-old", map[string]string{"app": "orders-api"}, true),
+		}, 3, metav1.ConditionFalse, "LabelMissing", "Pod/api-old", true},
+		{"pod owned by a job is not the PDB's concern", []client.Object{
+			deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}),
+			ownedPod("migrate-x", nil, "Job", corev1.PodRunning),
 		}, 3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
+		{"finished pod is ignored", []client.Object{
+			deploymentWithPodLabels("api", map[string]string{LabelName: "orders-api"}),
+			ownedPod("api-done", nil, "ReplicaSet", corev1.PodSucceeded),
+		}, 3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
+		{"unlabelled pod of a statefulset", []client.Object{
+			ownedPod("cache-0", map[string]string{"app": "cache"}, "StatefulSet", corev1.PodRunning),
+		}, 3, metav1.ConditionFalse, "LabelMissing", "Pod/cache-0", true},
 		{"labelled rollout", []client.Object{rollout("api", map[string]any{LabelName: "orders-api"})},
 			3, metav1.ConditionTrue, "Selected", "1 workload(s)", false},
 		{"rollout without the label", []client.Object{rollout("api", map[string]any{"app": "orders-api"})},
@@ -718,6 +742,25 @@ func TestWorkloadsSelectedCondition(t *testing.T) {
 				t.Fatal("a fixed label or a late sync is not watched; the reconcile must come back")
 			}
 		})
+	}
+}
+
+// A condition message names at most maxNamedWorkloads workloads, so a bad
+// template that every replica inherits does not print every pod.
+func TestWorkloadsSelectedMessageIsCapped(t *testing.T) {
+	var objs []client.Object
+	for i := 0; i < maxNamedWorkloads+3; i++ {
+		objs = append(objs, barePod(fmt.Sprintf("api-%d", i), map[string]string{"app": "x"}, true))
+	}
+	sd := valid()
+	sd.Spec.Replicas = ptr(int32(3))
+	c, r, req := newFixture(t, sd, objs...)
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(getSD(t, c, sd.Name, sd.Namespace).Status.Conditions, CondWorkloadsSelected)
+	if cond == nil || !strings.Contains(cond.Message, "and 3 more") || strings.Contains(cond.Message, "Pod/api-5") {
+		t.Fatalf("message not capped: %+v", cond)
 	}
 }
 
