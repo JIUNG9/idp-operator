@@ -5,6 +5,14 @@ and may still change.
 
 ## Unreleased
 
+- The operator now watches Deployments and StatefulSets, so `WorkloadsSelected` updates when a
+  workload appears, is deleted or changes its pod-template labels. Before, a label fix in the team's
+  repo showed up only at the next requeue (up to 5 minutes). Scaling, image bumps and status writes
+  are filtered out. Pods and Argo Rollouts are not watched yet. These two kinds are cached without
+  the managed-by label filter, since a team's workloads do not carry it; a transform keeps only the
+  metadata and pod-template labels in memory. The ClusterRole gains `watch` on `deployments` and
+  `statefulsets` (`config/rbac/role.yaml`); clusters running an older ClusterRole must apply it
+  before upgrading, or the cache sync fails.
 - `WorkloadsSelected` now also checks the labels of running pods owned by a ReplicaSet or StatefulSet.
   Before, it read only the pod template, so a pod created before the template was fixed kept its old
   labels, stayed outside the PDB, and the condition read `True`. The condition now reads `LabelMissing`

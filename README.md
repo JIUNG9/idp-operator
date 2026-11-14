@@ -48,7 +48,7 @@ operative, for example when the budget gate has stopped automated sync. A missin
 reports any whose pod template (or, for a Pod, labels) lacks `app.kubernetes.io/name: <service>`, the label the PDB
 selects on. It also checks the labels of the running pods that ReplicaSets and StatefulSets created, so a pod made before the template was fixed is reported until it is replaced. It is absent for services without a PDB, and reads `NoWorkloads` until the first
 workload is delivered. Argo Rollouts are read only when their CRD is installed. Pods owned by Jobs, DaemonSets or other controllers, and pods that finished or are terminating, are not checked. A message names at most 5 workloads. It never
-edits a workload.
+edits a workload. A change to a Deployment's or StatefulSet's pod-template labels, or one appearing or being deleted, triggers a reconcile; a pod or Rollout change is picked up at the next requeue.
 
 ## Allowed ArgoCD projects
 
