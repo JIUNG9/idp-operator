@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -256,7 +257,7 @@ func (c *components) all() []metav1.Condition {
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=idp.jiung9.github.io,resources=servicedeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
@@ -1098,6 +1099,80 @@ func specOrDeletionChanged() predicate.Predicate {
 	)
 }
 
+// templateLabels returns the pod-template labels of a Deployment or
+// StatefulSet, the labels the PDB selector has to match. Other kinds have none.
+func templateLabels(obj client.Object) map[string]string {
+	switch o := obj.(type) {
+	case *appsv1.Deployment:
+		return o.Spec.Template.Labels
+	case *appsv1.StatefulSet:
+		return o.Spec.Template.Labels
+	}
+	return nil
+}
+
+// TrimWorkload shrinks a Deployment or StatefulSet before it enters the
+// manager cache. The watch is not label-filtered (a team's workloads carry none
+// of our labels), so it holds every Deployment and StatefulSet in the cluster.
+// Only metadata and the pod-template labels are kept: workloadLabelsChanged and
+// mapWorkload need nothing else, and the reconciler reads full objects through
+// the uncached reader.
+func TrimWorkload(in interface{}) (interface{}, error) {
+	switch o := in.(type) {
+	case *appsv1.Deployment:
+		out := &appsv1.Deployment{ObjectMeta: trimmedMeta(o.ObjectMeta)}
+		out.Spec.Template.Labels = o.Spec.Template.Labels
+		return out, nil
+	case *appsv1.StatefulSet:
+		out := &appsv1.StatefulSet{ObjectMeta: trimmedMeta(o.ObjectMeta)}
+		out.Spec.Template.Labels = o.Spec.Template.Labels
+		return out, nil
+	}
+	return in, nil
+}
+
+// trimmedMeta keeps the identity fields an informer cache needs.
+func trimmedMeta(m metav1.ObjectMeta) metav1.ObjectMeta {
+	return metav1.ObjectMeta{
+		Name:              m.Name,
+		Namespace:         m.Namespace,
+		UID:               m.UID,
+		ResourceVersion:   m.ResourceVersion,
+		Generation:        m.Generation,
+		DeletionTimestamp: m.DeletionTimestamp,
+	}
+}
+
+// workloadLabelsChanged lets a Deployment or StatefulSet event through when
+// the workload appears or goes away, or its pod-template labels change. Image
+// bumps, scaling and status updates do not move those labels, and a team's
+// workloads change often, so they must not queue a reconcile.
+func workloadLabelsChanged() predicate.Predicate {
+	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+		return !maps.Equal(templateLabels(e.ObjectOld), templateLabels(e.ObjectNew))
+	}}
+}
+
+// mapWorkload routes a Deployment or StatefulSet in a service namespace to the
+// ServiceDeployment that provisioned the namespace. The namespace is named
+// after the ServiceDeployment, but the ServiceDeployment itself can live in
+// any namespace, so the name is looked up in the cache. The workload carries
+// none of our labels: it is delivered by the team's GitOps repo.
+func (r *ServiceDeploymentReconciler) mapWorkload(ctx context.Context, obj client.Object) []ctrl.Request {
+	var sds idpv1alpha1.ServiceDeploymentList
+	if err := r.List(ctx, &sds); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "listing ServiceDeployments to map a workload event", "namespace", obj.GetNamespace())
+		return nil
+	}
+	var reqs []ctrl.Request
+	for _, sd := range sds.Items {
+		if sd.Name == obj.GetNamespace() {
+			reqs = append(reqs, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&sd)})
+		}
+	}
+	return reqs
+}
+
 // SetupWithManager wires the reconciler into the manager.
 func (r *ServiceDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
@@ -1108,7 +1183,13 @@ func (r *ServiceDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
 		Watches(&policyv1.PodDisruptionBudget{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
-		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned))
+		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(mapProvisioned)).
+		// WorkloadsSelected reads these kinds uncached, so without a watch a
+		// label fix in the team's repo shows up only at the next requeue.
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapWorkload),
+			builder.WithPredicates(workloadLabelsChanged())).
+		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.mapWorkload),
+			builder.WithPredicates(workloadLabelsChanged()))
 
 	// The Application and Kyverno watches need their CRDs. On clusters
 	// without them, skip the watch instead of failing manager start — drift

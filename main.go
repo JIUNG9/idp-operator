@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -140,6 +141,11 @@ func main() {
 			&corev1.ConfigMap{}:             {Label: managed},
 			&policyv1.PodDisruptionBudget{}: {Label: managed},
 			&networkingv1.NetworkPolicy{}:   {Label: managed},
+			// Not label-filtered: a team's workloads carry none of our
+			// labels. The transform keeps the cached copy to the pod-template
+			// labels the workload watch compares.
+			&appsv1.Deployment{}:  {Transform: controller.TrimWorkload},
+			&appsv1.StatefulSet{}: {Transform: controller.TrimWorkload},
 		},
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts)
