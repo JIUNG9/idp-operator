@@ -275,3 +275,41 @@ func trimQuotes(s string) string {
 	}
 	return s
 }
+
+// The catalog entry is what users register in Backstage. It has to point at a
+// template file that exists and parses as the template kind the README names.
+func TestCatalogInfoRegistersTheTemplate(t *testing.T) {
+	raw, err := os.ReadFile("../../templates/backstage/catalog-info.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var loc struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Metadata   struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"metadata"`
+		Spec struct {
+			Type    string   `json:"type"`
+			Targets []string `json:"targets"`
+		} `json:"spec"`
+	}
+	if err := yaml.UnmarshalStrict(raw, &loc); err != nil {
+		t.Fatalf("catalog-info.yaml does not parse: %v", err)
+	}
+	if loc.APIVersion != "backstage.io/v1alpha1" || loc.Kind != "Location" {
+		t.Fatalf("want backstage.io/v1alpha1 Location, got %s %s", loc.APIVersion, loc.Kind)
+	}
+	if len(loc.Spec.Targets) != 1 {
+		t.Fatalf("want one target, got %v", loc.Spec.Targets)
+	}
+	target := filepath.Join("../../templates/backstage", loc.Spec.Targets[0])
+	want := filepath.Join(templateDir, "template.yaml")
+	if filepath.Clean(target) != filepath.Clean(want) {
+		t.Fatalf("target %s resolves to %s, want %s", loc.Spec.Targets[0], target, want)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("target does not exist: %v", err)
+	}
+}
