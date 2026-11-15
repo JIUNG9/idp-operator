@@ -1,0 +1,12 @@
+# Registers the idp-operator software template in a Backstage catalog.
+# Add this file's URL under `catalog.locations` in app-config.yaml; see the
+# README, "Backstage template". Replace the URL with your fork or mirror.
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: idp-operator-templates
+  description: Software templates for idp-operator.
+spec:
+  type: url
+  targets:
+    - ./service-deployment/template.yaml

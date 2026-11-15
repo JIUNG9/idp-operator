@@ -252,8 +252,25 @@ The form collects the `ServiceDeployment` fields, renders `skeleton/` into `serv
 pull request with `publish:github:pull-request`. The operator picks the manifest up after it merges, so the
 form never talks to the cluster.
 
-To use it, register `template.yaml` in your Backstage catalog and change `owner` and `repo` in the
-`pull-request` step to the repository your platform manifests are applied from. The skeleton writes
+To use it, register it in your Backstage catalog and change `owner` and `repo` in the
+`pull-request` step to the repository your platform manifests are applied from. `templates/backstage/catalog-info.yaml`
+is a `Location` that points at the template. Add its URL to `app-config.yaml`:
+
+```yaml
+catalog:
+  rules:
+    - allow: [Template, Location]
+  locations:
+    - type: url
+      target: https://github.com/<your-org>/idp-operator/blob/main/templates/backstage/catalog-info.yaml
+```
+
+The template uses two scaffolder actions, `fetch:template` and `publish:github:pull-request`. Both ship with
+Backstage's scaffolder backend. `publish:github:pull-request` needs a GitHub integration (`integrations.github`
+in `app-config.yaml`) whose token or app can push a branch and open pull requests on the target repository.
+The catalog's `rules` must allow the `Template` kind, or the entry registers but never shows in the "Create" page.
+
+ The skeleton writes
 `namespace: idp-system`, the namespace used in `examples/`; edit it if the operator watches another one.
 
 The form is a second copy of the CRD schema, so `go test ./test/scaffolder` checks it: every spec field has a form

@@ -5,6 +5,7 @@ and may still change.
 
 ## Unreleased
 
+- `templates/backstage/catalog-info.yaml` is a Backstage `Location` that registers the software template. The README now shows the `catalog.locations` entry and names the two scaffolder actions the template uses (`fetch:template`, `publish:github:pull-request`) and the GitHub integration the second one needs. A test checks that the file parses and its target is the template.
 - The operator now watches Deployments and StatefulSets, so `WorkloadsSelected` updates when a
   workload appears, is deleted or changes its pod-template labels. Before, a label fix in the team's
   repo showed up only at the next requeue (up to 5 minutes). Scaling, image bumps and status writes
