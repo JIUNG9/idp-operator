@@ -194,11 +194,13 @@ service, not what a compromised pod inside it can reach. Containment is
 
 ## What this operator does not check
 
-- **Kyverno's health.** The operator confirms the cluster knows what a Kyverno
-  Policy is, writes one, and reports that it was accepted. Whether it is
-  *enforced* depends on Kyverno's admission webhook being alive, which is not
-  verified here — a broken Kyverno admits privileged pods while
-  `AdmissionPolicyReady` still reads true. The condition message says so.
+- **Kyverno's admission webhook.** The operator writes the Policy and reads
+  Kyverno's own status on it back (`status.conditions[type=Ready]`, else
+  `status.ready`). A policy Kyverno reports as not ready sets
+  `AdmissionPolicyReady=False/KyvernoPolicyNotReady` and `Ready=False`. A policy with no
+  status yet reads true and the message says Kyverno has not reported. Whether the
+  admission webhook is reachable and enforcing is not probed: a Kyverno whose webhook is
+  down can still admit privileged pods while the Policy status reads Ready.
 - **`spec.environment` is a declaration, not a security boundary.** A team that can
   edit its own `ServiceDeployment` can relabel a production service as `dev` and win
   back automated delivery in the 0–25% band. Two things bound it: an *exhausted*
@@ -281,8 +283,7 @@ that test.
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md). Next up: `spec.network.allowEgressTo`, which is what makes
-an egress default-deny safe to ship, and reading Kyverno's own policy status back so
-`AdmissionPolicyReady` reflects enforcement rather than storage.
+an egress default-deny safe to ship, and a platform-enforced `spec.environment`.
 
 ## Development
 
