@@ -704,13 +704,21 @@ func (r *ServiceDeploymentReconciler) reconcileAdmissionPolicy(ctx context.Conte
 		return err
 	}
 
-	// "Provisioned", not "Enforced": this operator wrote a policy the API
-	// server accepted. Whether it is enforced depends on Kyverno's admission
-	// webhook being healthy, which is Kyverno's business and is not checked
-	// here — a broken Kyverno would admit privileged pods while this
-	// condition still reads green.
+	// Kyverno reports whether it loaded the policy in the policy's own status.
+	// That is evidence the policy is live in Kyverno, not proof its admission
+	// webhook is healthy, so the condition still says "accepted" and never
+	// "enforced". A policy Kyverno could not load (a rule it rejected, a
+	// controller that is down) degrades the service: the guardrail is declared
+	// but not active. A status Kyverno has not written yet is not a failure;
+	// the Policy watch fires when Kyverno writes it.
+	readiness, detail := kyvernoReadiness(pol)
+	if readiness == kyvernoNotReady {
+		c.degrade(CondAdmissionPolicyReady, "KyvernoPolicyNotReady",
+			"Kyverno reports the policy not ready: "+detail+"; privileged pods may be admitted until it is")
+		return nil
+	}
 	message := "policy accepted, declaring " + strings.Join(KyvernoRuleNames(r.Policy), ", ") +
-		" (enforcement depends on Kyverno's webhook, which this operator does not verify)"
+		" (" + detail + "; the operator does not probe Kyverno's admission webhook)"
 	if !r.Policy.ImageVerificationConfigured() {
 		message += "; image signatures are NOT verified (no signing identity configured on the operator)"
 	} else if !r.Policy.RequireImageDigests {
@@ -718,6 +726,44 @@ func (r *ServiceDeploymentReconciler) reconcileAdmissionPolicy(ctx context.Conte
 	}
 	c.ready(CondAdmissionPolicyReady, "Provisioned", message)
 	return nil
+}
+
+type kyvernoState int
+
+const (
+	kyvernoUnreported kyvernoState = iota
+	kyvernoReady
+	kyvernoNotReady
+)
+
+// kyvernoReadiness reads the Policy's own status: status.conditions[type=Ready]
+// first, then the older status.ready bool. The condition wins when both exist.
+// No status at all means Kyverno has not processed the policy yet, or is too
+// old to say. These field shapes come from Kyverno's Policy status type and
+// are not exercised against a live Kyverno here (the e2e pins v1.13.4).
+func kyvernoReadiness(pol *unstructured.Unstructured) (kyvernoState, string) {
+	conds, _, _ := unstructured.NestedSlice(pol.Object, "status", "conditions")
+	for _, raw := range conds {
+		cond, ok := raw.(map[string]any)
+		if !ok || cond["type"] != "Ready" {
+			continue
+		}
+		reason, _ := cond["reason"].(string)
+		msg, _ := cond["message"].(string)
+		switch cond["status"] {
+		case "True":
+			return kyvernoReady, "Kyverno reports the policy Ready"
+		case "False":
+			return kyvernoNotReady, strings.TrimSpace(reason + " " + msg)
+		}
+	}
+	if ready, found, err := unstructured.NestedBool(pol.Object, "status", "ready"); err == nil && found {
+		if ready {
+			return kyvernoReady, "Kyverno reports the policy ready"
+		}
+		return kyvernoNotReady, "status.ready is false"
+	}
+	return kyvernoUnreported, "Kyverno has not reported a status for the policy yet"
 }
 
 // reconcileBudgetGate reads the service's error budget and decides whether
