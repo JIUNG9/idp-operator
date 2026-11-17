@@ -4,7 +4,9 @@ GOBIN ?= $(shell go env GOPATH)/bin
 CONTROLLER_GEN ?= $(GOBIN)/controller-gen
 SETUP_ENVTEST ?= $(GOBIN)/setup-envtest
 
-.PHONY: all build fmt vet test generate manifests tools
+GIT_CLIFF ?= git-cliff
+
+.PHONY: all build fmt vet test generate manifests tools release-notes
 
 all: build
 
@@ -36,3 +38,8 @@ vet:
 test: vet
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
 		go test ./... -coverprofile cover.out
+
+## Print release notes for the commits since the last tag (all commits while no tag exists).
+## Needs git-cliff (https://git-cliff.org/docs/installation). CHANGELOG.md is not touched.
+release-notes:
+	$(GIT_CLIFF) --config cliff.toml --unreleased
