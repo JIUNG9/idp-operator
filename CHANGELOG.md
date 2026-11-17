@@ -5,6 +5,7 @@ and may still change.
 
 ## Unreleased
 
+- `make release-notes` prints release notes for the commits since the last tag, grouped by conventional-commit type, using git-cliff and the new `cliff.toml`. This file stays hand-written. Commits whose type is not one of feat, fix, docs, perf, refactor, test, chore, ci or build are left out, and git-cliff logs a warning for them. Requires git-cliff on PATH.
 - `templates/backstage/catalog-info.yaml` is a Backstage `Location` that registers the software template. The README now shows the `catalog.locations` entry and names the two scaffolder actions the template uses (`fetch:template`, `publish:github:pull-request`) and the GitHub integration the second one needs. A test checks that the file parses and its target is the template.
 - The operator now watches Deployments and StatefulSets, so `WorkloadsSelected` updates when a
   workload appears, is deleted or changes its pod-template labels. Before, a label fix in the team's
