@@ -290,6 +290,7 @@ an egress default-deny safe to ship, and reading Kyverno's own policy status bac
 make tools     # controller-gen + setup-envtest
 make test      # vet + unit + envtest
 make manifests # regenerate CRD and RBAC from markers
+make release-notes # release notes since the last tag (needs git-cliff)
 ```
 
 The end-to-end test needs Docker and kind. It creates a throwaway cluster and
