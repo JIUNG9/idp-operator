@@ -174,9 +174,9 @@ StatefulSet. It reads nothing but Deployments, StatefulSets, Rollouts and Pods.
   below the 25% line. Exhaustion still blocks everywhere and the gate records what it
   believed, but an operator-side mapping (namespace or label to environment) would make
   it enforcement rather than governance.
-- **Kyverno enforcement readback** — read the provisioned policy's own status back, so
-  `AdmissionPolicyReady` reflects whether Kyverno accepted and is enforcing it, not just
-  that the API server stored it. Today a broken Kyverno reads as green.
+- **Kyverno webhook probe** — the operator reads the Policy's own status back (done), but
+  a Kyverno whose admission webhook is down can still report the Policy Ready. Probing the
+  webhook is the remaining gap.
 
 ## Non-goals (for now)
 
