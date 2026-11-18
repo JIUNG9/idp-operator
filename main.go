@@ -40,6 +40,7 @@ func main() {
 		ingressCIDRs      = flag.String("allow-ingress-from-cidrs", "", "comma-separated CIDRs allowed to reach services, for load balancers that target pod IPs directly")
 
 		allowedProjects = flag.String("allowed-projects", "", "comma-separated ArgoCD AppProjects a ServiceDeployment may name in spec.gitops.project. The operator writes Applications with its own privileges, so list only projects every team may use. Empty rejects every ServiceDeployment")
+		nsEnvironments  = flag.String("namespace-environments", "", "comma-separated namespace=environment pairs (prod, staging or dev). A ServiceDeployment in a listed namespace is gated as that environment whatever its spec.environment says, so a team cannot relabel prod as dev. Unlisted namespaces keep the spec value")
 		argocdNamespace = flag.String("argocd-namespace", controller.ArgoCDNamespace, "namespace where ArgoCD Applications are written")
 
 		prometheusURL   = flag.String("prometheus-url", "", "Prometheus base URL for error-budget readings. Empty means delivery is not budget-gated at all")
@@ -124,6 +125,12 @@ func main() {
 		setupLog.Info("no -allowed-projects set; every ServiceDeployment will be rejected until one is listed")
 	}
 
+	namespaceEnvironments, err := controller.ParseNamespaceEnvironments(*nsEnvironments)
+	if err != nil {
+		setupLog.Error(err, "invalid -namespace-environments")
+		os.Exit(1)
+	}
+
 	scheme := clientgoscheme.Scheme
 	if err := idpv1alpha1.AddToScheme(scheme); err != nil {
 		setupLog.Error(err, "unable to register API types")
@@ -163,11 +170,12 @@ func main() {
 			AllowIngressFromNamespaces: splitList(*ingressNamespaces),
 			AllowIngressFromCIDRs:      splitList(*ingressCIDRs),
 		},
-		AllowedProjects:      splitList(*allowedProjects),
-		ArgoCDNamespace:      *argocdNamespace,
-		Policy:               policyConfig,
-		BurnSource:           burnSource,
-		ReevaluationInterval: *reevalInterval,
+		AllowedProjects:       splitList(*allowedProjects),
+		ArgoCDNamespace:       *argocdNamespace,
+		NamespaceEnvironments: namespaceEnvironments,
+		Policy:                policyConfig,
+		BurnSource:            burnSource,
+		ReevaluationInterval:  *reevalInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ServiceDeployment")
 		os.Exit(1)
