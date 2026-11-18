@@ -130,6 +130,50 @@ type ServiceDeploymentReconciler struct {
 	// ArgoCDNamespace is where Applications are written. Empty means the
 	// ArgoCDNamespace constant.
 	ArgoCDNamespace string
+	// NamespaceEnvironments maps the namespace a ServiceDeployment lives in
+	// to the environment the budget gate must use for it, whatever
+	// spec.environment says. Who may create objects in a namespace is a
+	// cluster RBAC decision, so this is the part a team cannot relabel. A
+	// namespace that is not listed keeps the environment in its spec.
+	NamespaceEnvironments map[string]string
+}
+
+// effectiveEnvironment is the environment the budget gate acts on: the
+// platform's mapping for the object's namespace when there is one, otherwise
+// the team's own declaration.
+func (r *ServiceDeploymentReconciler) effectiveEnvironment(sd *idpv1alpha1.ServiceDeployment) string {
+	if env, ok := r.NamespaceEnvironments[sd.Namespace]; ok {
+		return env
+	}
+	return sd.Spec.Environment
+}
+
+// ParseNamespaceEnvironments parses "namespace=environment,..." as given to
+// -namespace-environments. Environments must be ones the API accepts, so a
+// typo fails at startup instead of silently counting as production.
+func ParseNamespaceEnvironments(s string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		ns, env, ok := strings.Cut(part, "=")
+		ns, env = strings.TrimSpace(ns), strings.TrimSpace(env)
+		if !ok || ns == "" {
+			return nil, fmt.Errorf("%q is not namespace=environment", part)
+		}
+		switch env {
+		case "prod", "staging", "dev":
+		default:
+			return nil, fmt.Errorf("namespace %q: environment %q is not one of prod, staging, dev", ns, env)
+		}
+		if prev, dup := out[ns]; dup && prev != env {
+			return nil, fmt.Errorf("namespace %q is mapped to both %q and %q", ns, prev, env)
+		}
+		out[ns] = env
+	}
+	return out, nil
 }
 
 func (r *ServiceDeploymentReconciler) argocdNamespace() string {
@@ -850,7 +894,7 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 
 	decision := budget.Evaluate(budget.Input{
 		Tier:       sd.Spec.TierOrDefault(),
-		Production: budget.IsProduction(sd.Spec.Environment),
+		Production: budget.IsProduction(r.effectiveEnvironment(sd)),
 		Remaining:  remaining,
 	})
 	inForce, streak := resolveVerdict(prev, decision.Verdict)
@@ -861,7 +905,7 @@ func (r *ServiceDeploymentReconciler) reconcileBudgetGate(ctx context.Context, s
 		RemainingPercent:   int32(math.Round(remaining * 100)),
 		Streak:             streak,
 		Source:             r.BurnSource.Describe(),
-		Environment:        sd.Spec.Environment,
+		Environment:        r.effectiveEnvironment(sd),
 		Tier:               sd.Spec.TierOrDefault(),
 		LastEvaluationTime: &now,
 	}

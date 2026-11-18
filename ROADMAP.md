@@ -169,11 +169,10 @@ StatefulSet. It reads nothing but Deployments, StatefulSets, Rollouts and Pods.
 
 - **`spec.network.allowEgressTo`** — declared dependencies become egress policy, which
   is what makes an egress default-deny safe to ship. Split out of M2 on purpose.
-- **Platform-enforced environment** — `spec.environment` weakens the budget verdict and
-  is self-service, so a team can relabel prod as dev to win back automated delivery
-  below the 25% line. Exhaustion still blocks everywhere and the gate records what it
-  believed, but an operator-side mapping (namespace or label to environment) would make
-  it enforcement rather than governance.
+- **Namespace-label environment mapping** — `-namespace-environments` maps a namespace
+  name to an environment and overrides `spec.environment` (done). Mapping by a namespace
+  label is not implemented: a team that can label its own namespace could still pick its
+  environment, so it needs a label only the platform can set.
 - **Kyverno webhook probe** — the operator reads the Policy's own status back (done), but
   a Kyverno whose admission webhook is down can still report the Policy Ready. Probing the
   webhook is the remaining gap.

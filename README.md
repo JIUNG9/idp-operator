@@ -201,13 +201,15 @@ service, not what a compromised pod inside it can reach. Containment is
   status yet reads true and the message says Kyverno has not reported. Whether the
   admission webhook is reachable and enforcing is not probed: a Kyverno whose webhook is
   down can still admit privileged pods while the Policy status reads Ready.
-- **`spec.environment` is a declaration, not a security boundary.** A team that can
-  edit its own `ServiceDeployment` can relabel a production service as `dev` and win
-  back automated delivery in the 0–25% band. Two things bound it: an *exhausted*
-  budget blocks in every environment, and the gate records the environment and tier
-  it believed into `status.budget`, so the relabel is visible in the object's own
-  status rather than being invisible. Platform-enforced environments are on the
-  roadmap; today this is governance, not enforcement.
+- **`spec.environment` is a declaration unless you map the namespace.** By default a team
+  that can edit its own `ServiceDeployment` can relabel a production service as `dev` and win
+  back automated delivery in the 0–25% band. Start the operator with
+  `-namespace-environments=payments=prod,sandbox=dev` and a `ServiceDeployment` in a listed
+  namespace is gated as the mapped environment whatever its spec says; namespaces that are not
+  listed keep the spec value. The mapping uses the namespace the object lives in, so it holds
+  as long as cluster RBAC limits who can create objects there. Without the flag, two things
+  bound the relabel: an *exhausted* budget blocks in every environment, and the gate records
+  the environment and tier it used into `status.budget`.
 - **Whether your metrics mean what the burn query assumes.** The default query
   counts `http_requests_total` with a `5..` status. If your services do not emit
   that, replace it with `-burn-query`; a query that matches nothing is treated as
@@ -283,7 +285,7 @@ that test.
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md). Next up: `spec.network.allowEgressTo`, which is what makes
-an egress default-deny safe to ship, and a platform-enforced `spec.environment`.
+an egress default-deny safe to ship, and a namespace-label mapping for `spec.environment`.
 
 ## Development
 
