@@ -74,6 +74,24 @@ spec:
           type: integer
           default: 300
           minimum: 1
+    - title: Network
+      properties:
+        allowEgressTo:
+          title: Namespaces this service calls
+          type: array
+          description: Recorded and shown in the status for now. No egress policy is applied yet, so egress stays unrestricted.
+          default: []
+          items:
+            type: object
+            required:
+              - namespace
+            properties:
+              namespace:
+                title: Namespace
+                type: string
+                pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                minLength: 1
+                maxLength: 63
     - title: Delivery
       required:
         - repoURL
@@ -113,6 +131,7 @@ spec:
           replicas: ${{ parameters.replicas }}
           availabilityTarget: ${{ parameters.availabilityTarget }}
           latencyP99Ms: ${{ parameters.latencyP99Ms }}
+          allowEgressTo: ${{ parameters.allowEgressTo }}
           repoURL: ${{ parameters.repoURL }}
           path: ${{ parameters.path }}
           targetRevision: ${{ parameters.targetRevision }}

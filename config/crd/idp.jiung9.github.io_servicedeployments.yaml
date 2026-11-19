@@ -102,6 +102,36 @@ spec:
                 - path
                 - repoURL
                 type: object
+              network:
+                default: {}
+                description: |-
+                  Network is what the service declares about its traffic. Slice 1 records the
+                  declaration and reports it in status. No egress policy is applied yet:
+                  egress default-deny only becomes safe once declared dependencies turn into
+                  allow rules.
+                properties:
+                  allowEgressTo:
+                    default: []
+                    description: AllowEgressTo lists the namespaces this service calls.
+                    items:
+                      description: EgressTarget names one destination the service
+                        declares it calls.
+                      properties:
+                        namespace:
+                          description: Namespace is the namespace of a cluster-internal
+                            dependency.
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - namespace
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - namespace
+                    x-kubernetes-list-type: map
+                type: object
               replicas:
                 default: 1
                 description: |-

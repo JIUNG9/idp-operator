@@ -35,6 +35,28 @@ type GitOps struct {
 	Project string `json:"project,omitempty"`
 }
 
+// EgressTarget names one destination the service declares it calls.
+type EgressTarget struct {
+	// Namespace is the namespace of a cluster-internal dependency.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Namespace string `json:"namespace"`
+}
+
+// Network is what the service declares about its traffic. Slice 1 records the
+// declaration and reports it in status. No egress policy is applied yet:
+// egress default-deny only becomes safe once declared dependencies turn into
+// allow rules.
+type Network struct {
+	// AllowEgressTo lists the namespaces this service calls.
+	// +kubebuilder:default:={}
+	// +listType=map
+	// +listMapKey=namespace
+	// +optional
+	AllowEgressTo []EgressTarget `json:"allowEgressTo,omitempty"`
+}
+
 // ServiceDeploymentSpec is the single manifest a team writes to get a
 // namespace, GitOps delivery, and an SLO baseline.
 type ServiceDeploymentSpec struct {
@@ -81,8 +103,11 @@ type ServiceDeploymentSpec struct {
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`
 	// +kubebuilder:default={}
 	// +optional
-	SLO    SLO    `json:"slo,omitempty"`
-	GitOps GitOps `json:"gitops"`
+	SLO SLO `json:"slo,omitempty"`
+	// +kubebuilder:default={}
+	// +optional
+	Network Network `json:"network,omitempty"`
+	GitOps  GitOps  `json:"gitops"`
 }
 
 // Values of spec.deletionPolicy.
