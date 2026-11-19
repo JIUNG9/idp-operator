@@ -39,7 +39,7 @@ That's the whole onboarding. See `examples/orders-api.yaml` for the full shape.
 Teams that use Backstage can fill in a form instead: see [Backstage template](#backstage-template).
 
 Every component reports its own status condition: `NamespaceReady`, `SLOReady`,
-`PDBReady`, `NetworkPolicyReady`, `AdmissionPolicyReady`, `BudgetGateReady`,
+`PDBReady`, `NetworkPolicyReady`, `EgressDeclared`, `AdmissionPolicyReady`, `BudgetGateReady`,
 `DeliveryReady`, `WorkloadsSelected`, plus two aggregates. `Provisioned` is `True` when the objects exist and
 names anything that was skipped. `Ready` is `False` with reason `Degraded` while a provisioned component is not
 operative, for example when the budget gate has stopped automated sync. A missing guardrail is reported in the status and never reads as healthy.
@@ -242,6 +242,23 @@ removed. The namespace follows the same rule.
 
 Applying a `ServiceDeployment` with the same name again adopts a retained namespace, because its
 owner label still matches. To remove a retained namespace, run `kubectl delete namespace <name>`.
+
+## Declaring egress dependencies
+
+`spec.network.allowEgressTo` lists the namespaces a service calls:
+
+```yaml
+spec:
+  network:
+    allowEgressTo:
+      - namespace: payments
+      - namespace: ledger
+```
+
+Each `namespace` must be a DNS-1123 label, and a namespace may appear once. The operator records
+the list in the `EgressDeclared` condition. **It does not apply an egress policy yet**: egress stays
+unrestricted, and the condition message says so. Turning the list into NetworkPolicy allow rules, and
+an egress default-deny behind them, is the next step (see ROADMAP).
 
 ## The label contract
 

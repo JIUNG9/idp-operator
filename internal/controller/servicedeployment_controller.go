@@ -90,6 +90,7 @@ const (
 	CondPDBReady             = "PDBReady"
 	CondWorkloadsSelected    = "WorkloadsSelected"
 	CondNetworkPolicyReady   = "NetworkPolicyReady"
+	CondEgressDeclared       = "EgressDeclared"
 	CondAdmissionPolicyReady = "AdmissionPolicyReady"
 	CondDeliveryReady        = "DeliveryReady"
 	CondBudgetGateReady      = "BudgetGateReady"
@@ -363,6 +364,7 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		{CondSLOReady, "slo baseline", func() error { return r.reconcileSLOBaseline(ctx, &sd, labels, c) }},
 		{CondPDBReady, "pdb", func() error { return r.reconcilePDB(ctx, &sd, labels, c) }},
 		{CondNetworkPolicyReady, "network policy", func() error { return r.reconcileNetworkPolicies(ctx, &sd, labels, c) }},
+		{CondEgressDeclared, "egress declaration", func() error { reportEgress(&sd, c); return nil }},
 		{CondAdmissionPolicyReady, "admission policy", func() error { return r.reconcileAdmissionPolicy(ctx, &sd, labels, c) }},
 		{CondBudgetGateReady, "budget gate", func() error {
 			v, err := r.reconcileBudgetGate(ctx, &sd, c)
@@ -721,6 +723,25 @@ func (r *ServiceDeploymentReconciler) reconcileNetworkPolicies(ctx context.Conte
 	c.ready(CondNetworkPolicyReady, "DefaultDenyIngress",
 		"ingress denied except from within the namespace and "+strings.Join(sources, ", "))
 	return nil
+}
+
+// reportEgress records what the service declared in spec.network.allowEgressTo.
+// Nothing is enforced yet, and the message says so: a condition that read
+// "egress restricted" would claim a protection the cluster does not have.
+func reportEgress(sd *idpv1alpha1.ServiceDeployment, c *components) {
+	targets := sd.Spec.Network.AllowEgressTo
+	if len(targets) == 0 {
+		c.ready(CondEgressDeclared, "NoneDeclared",
+			"no egress destinations declared in spec.network.allowEgressTo; egress is not restricted")
+		return
+	}
+	names := make([]string, len(targets))
+	for i, t := range targets {
+		names[i] = t.Namespace
+	}
+	c.ready(CondEgressDeclared, "Declared", fmt.Sprintf(
+		"%d egress destination(s) declared: %s; no egress policy is applied yet, egress is not restricted",
+		len(targets), strings.Join(names, ", ")))
 }
 
 // reconcileAdmissionPolicy installs the Kyverno baseline. Kyverno is not a

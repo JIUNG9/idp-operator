@@ -12,6 +12,8 @@ spec:
   slo:
     availabilityTarget: "${{ values.availabilityTarget }}"
     latencyP99Ms: ${{ values.latencyP99Ms }}
+  network:
+    allowEgressTo: ${{ values.allowEgressTo | dump }}
   gitops:
     repoURL: ${{ values.repoURL }}
     path: ${{ values.path }}

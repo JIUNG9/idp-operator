@@ -33,6 +33,7 @@ var formToCRD = map[string][]string{
 	"replicas":           {"replicas"},
 	"availabilityTarget": {"slo", "availabilityTarget"},
 	"latencyP99Ms":       {"slo", "latencyP99Ms"},
+	"allowEgressTo":      {"network", "allowEgressTo"},
 	"repoURL":            {"gitops", "repoURL"},
 	"path":               {"gitops", "path"},
 	"targetRevision":     {"gitops", "targetRevision"},
@@ -196,7 +197,9 @@ func TestFormRequiresWhatTheCRDRequires(t *testing.T) {
 	}
 }
 
-var placeholder = regexp.MustCompile(`\$\{\{\s*values\.(\w+)\s*\}\}`)
+// A value may be piped through `dump`, which Backstage renders as JSON (valid
+// YAML flow syntax); the test substitutes the field's default as JSON too.
+var placeholder = regexp.MustCompile(`\$\{\{\s*values\.(\w+)(?:\s*\|\s*dump)?\s*\}\}`)
 
 // TestSkeletonRendersAValidServiceDeployment fills the skeleton with the
 // form's own defaults and sample values for the required fields, then decodes

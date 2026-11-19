@@ -44,6 +44,15 @@ func TestValidate(t *testing.T) {
 		{"missing path", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.GitOps.Path = "" }, "gitops"},
 		{"availability not a number", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.SLO.AvailabilityTarget = "always" }, "percentage"},
 		{"availability 100", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.SLO.AvailabilityTarget = "100" }, "percentage"},
+		{"egress namespace uppercase", func(sd *idpv1alpha1.ServiceDeployment) {
+			sd.Spec.Network.AllowEgressTo = []idpv1alpha1.EgressTarget{{Namespace: "Payments"}}
+		}, "allowEgressTo[0]"},
+		{"egress namespace listed twice", func(sd *idpv1alpha1.ServiceDeployment) {
+			sd.Spec.Network.AllowEgressTo = []idpv1alpha1.EgressTarget{{Namespace: "payments"}, {Namespace: "payments"}}
+		}, "twice"},
+		{"egress namespaces valid", func(sd *idpv1alpha1.ServiceDeployment) {
+			sd.Spec.Network.AllowEgressTo = []idpv1alpha1.EgressTarget{{Namespace: "payments"}, {Namespace: "ledger"}}
+		}, ""},
 		{"negative latency", func(sd *idpv1alpha1.ServiceDeployment) { sd.Spec.SLO.LatencyP99Ms = -1 }, "negative"},
 	}
 	for _, tc := range cases {
