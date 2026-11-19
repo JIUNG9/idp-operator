@@ -168,7 +168,9 @@ StatefulSet. It reads nothing but Deployments, StatefulSets, Rollouts and Pods.
 ## Next after M4
 
 - **`spec.network.allowEgressTo`** — declared dependencies become egress policy, which
-  is what makes an egress default-deny safe to ship. Split out of M2 on purpose.
+  is what makes an egress default-deny safe to ship. Split out of M2 on purpose. The
+  field, its validation and the `EgressDeclared` status condition are done; turning the
+  list into NetworkPolicy allow rules, then the default-deny, is not.
 - **Namespace-label environment mapping** — `-namespace-environments` maps a namespace
   name to an environment and overrides `spec.environment` (done). Mapping by a namespace
   label is not implemented: a team that can label its own namespace could still pick its

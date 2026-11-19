@@ -75,6 +75,16 @@ func Validate(sd *idpv1alpha1.ServiceDeployment) error {
 	if sd.Spec.SLO.LatencyP99Ms < 0 {
 		return fmt.Errorf("spec.slo.latencyP99Ms must not be negative")
 	}
+	seen := map[string]bool{}
+	for i, t := range sd.Spec.Network.AllowEgressTo {
+		if !rfc1123.MatchString(t.Namespace) || len(t.Namespace) > 63 {
+			return fmt.Errorf("spec.network.allowEgressTo[%d].namespace %q must be a DNS-1123 label", i, t.Namespace)
+		}
+		if seen[t.Namespace] {
+			return fmt.Errorf("spec.network.allowEgressTo lists namespace %q twice", t.Namespace)
+		}
+		seen[t.Namespace] = true
+	}
 	return nil
 }
 
