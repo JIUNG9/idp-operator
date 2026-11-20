@@ -137,6 +137,11 @@ type ServiceDeploymentReconciler struct {
 	// cluster RBAC decision, so this is the part a team cannot relabel. A
 	// namespace that is not listed keeps the environment in its spec.
 	NamespaceEnvironments map[string]string
+	// EnforceEgress turns spec.network.allowEgressTo into a NetworkPolicy
+	// that drops every other egress. Off by default: with it on, a service
+	// that has not declared a dependency loses access to it, so declare
+	// first, then enable.
+	EnforceEgress bool
 }
 
 // effectiveEnvironment is the environment the budget gate acts on: the
@@ -364,7 +369,7 @@ func (r *ServiceDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		{CondSLOReady, "slo baseline", func() error { return r.reconcileSLOBaseline(ctx, &sd, labels, c) }},
 		{CondPDBReady, "pdb", func() error { return r.reconcilePDB(ctx, &sd, labels, c) }},
 		{CondNetworkPolicyReady, "network policy", func() error { return r.reconcileNetworkPolicies(ctx, &sd, labels, c) }},
-		{CondEgressDeclared, "egress declaration", func() error { reportEgress(&sd, c); return nil }},
+		{CondEgressDeclared, "egress policy", func() error { return r.reconcileEgress(ctx, &sd, labels, c) }},
 		{CondAdmissionPolicyReady, "admission policy", func() error { return r.reconcileAdmissionPolicy(ctx, &sd, labels, c) }},
 		{CondBudgetGateReady, "budget gate", func() error {
 			v, err := r.reconcileBudgetGate(ctx, &sd, c)
@@ -725,23 +730,53 @@ func (r *ServiceDeploymentReconciler) reconcileNetworkPolicies(ctx context.Conte
 	return nil
 }
 
-// reportEgress records what the service declared in spec.network.allowEgressTo.
-// Nothing is enforced yet, and the message says so: a condition that read
-// "egress restricted" would claim a protection the cluster does not have.
-func reportEgress(sd *idpv1alpha1.ServiceDeployment, c *components) {
+// reconcileEgress reports what the service declared in
+// spec.network.allowEgressTo and, when the operator runs with -enforce-egress,
+// applies it as a NetworkPolicy. With the flag off it removes a policy left by
+// an earlier run, and the message says egress is not restricted: a condition
+// that read "restricted" would claim a protection the cluster does not have.
+// Enforcement itself is the CNI's job; the condition describes the policy, not
+// proof that the cluster's network plugin implements NetworkPolicy.
+func (r *ServiceDeploymentReconciler) reconcileEgress(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	targets := sd.Spec.Network.AllowEgressTo
-	if len(targets) == 0 {
-		c.ready(CondEgressDeclared, "NoneDeclared",
-			"no egress destinations declared in spec.network.allowEgressTo; egress is not restricted")
-		return
-	}
 	names := make([]string, len(targets))
 	for i, t := range targets {
 		names[i] = t.Namespace
 	}
-	c.ready(CondEgressDeclared, "Declared", fmt.Sprintf(
-		"%d egress destination(s) declared: %s; no egress policy is applied yet, egress is not restricted",
-		len(targets), strings.Join(names, ", ")))
+
+	if !r.EnforceEgress {
+		stale := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: NetworkPolicyEgress, Namespace: sd.Name}}
+		if err := r.deleteOwned(ctx, sd, stale); err != nil {
+			return err
+		}
+		if len(targets) == 0 {
+			c.ready(CondEgressDeclared, "NoneDeclared",
+				"no egress destinations declared in spec.network.allowEgressTo; egress is not restricted")
+			return nil
+		}
+		c.ready(CondEgressDeclared, "Declared", fmt.Sprintf(
+			"%d egress destination(s) declared: %s; the operator runs without -enforce-egress, so egress is not restricted",
+			len(targets), strings.Join(names, ", ")))
+		return nil
+	}
+
+	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: NetworkPolicyEgress, Namespace: sd.Name}}
+	if err := r.applyManaged(ctx, sd, np, func() error {
+		np.Labels = labels
+		np.Spec = EgressSpec(names)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		c.ready(CondEgressDeclared, "Enforced",
+			"egress limited to this namespace and DNS in "+DNSNamespace+"; no destinations declared in spec.network.allowEgressTo")
+		return nil
+	}
+	c.ready(CondEgressDeclared, "Enforced", fmt.Sprintf(
+		"egress limited to this namespace, DNS in %s and %d declared destination(s): %s",
+		DNSNamespace, len(targets), strings.Join(names, ", ")))
+	return nil
 }
 
 // reconcileAdmissionPolicy installs the Kyverno baseline. Kyverno is not a
