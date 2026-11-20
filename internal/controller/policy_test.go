@@ -8,7 +8,7 @@ import (
 func TestDenyIngressLeavesEgressAlone(t *testing.T) {
 	spec := DenyIngressSpec()
 	if len(spec.PolicyTypes) != 1 || string(spec.PolicyTypes[0]) != "Ingress" {
-		t.Fatalf("policy types = %v; egress default-deny needs declared dependencies and has none yet", spec.PolicyTypes)
+		t.Fatalf("policy types = %v; egress is restricted only by EgressSpec", spec.PolicyTypes)
 	}
 	if len(spec.Ingress) != 0 {
 		t.Fatalf("a deny policy must carry no ingress rules, got %+v", spec.Ingress)

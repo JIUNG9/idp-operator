@@ -1,9 +1,11 @@
 package controller
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // Provisioned policy object names. Prefixed so a team can add its own
@@ -12,6 +14,7 @@ const (
 	NetworkPolicyDenyIngress   = "idp-default-deny-ingress"
 	NetworkPolicyAllowSameNS   = "idp-allow-same-namespace"
 	NetworkPolicyAllowPlatform = "idp-allow-platform-ingress"
+	NetworkPolicyEgress        = "idp-egress"
 	KyvernoPolicyName          = "idp-baseline"
 )
 
@@ -46,9 +49,8 @@ func (nc NetworkConfig) PlatformIngressConfigured() bool {
 }
 
 // DenyIngressSpec denies all ingress to every pod in the namespace. Egress is
-// deliberately untouched: an egress default-deny needs each service's
-// dependencies declared before it is anything but an outage, and that
-// declaration does not exist yet (see ROADMAP).
+// untouched here: it is restricted only by EgressSpec, and only when the
+// operator runs with -enforce-egress.
 func DenyIngressSpec() networkingv1.NetworkPolicySpec {
 	return networkingv1.NetworkPolicySpec{
 		PodSelector: metav1.LabelSelector{},
@@ -67,6 +69,49 @@ func SameNamespaceIngressSpec() networkingv1.NetworkPolicySpec {
 				PodSelector: &metav1.LabelSelector{},
 			}},
 		}},
+	}
+}
+
+// DNSNamespace is where cluster DNS runs. EgressSpec admits port 53 to it, or
+// a restricted pod could not resolve the names of the services it declared.
+const DNSNamespace = "kube-system"
+
+// EgressSpec restricts egress for every pod in the namespace to: pods in the
+// same namespace, DNS (port 53, UDP and TCP) in DNSNamespace, and every pod in
+// each declared namespace. Selecting Egress with a rule list is the default
+// deny: anything not listed is dropped. A service that declares nothing is
+// therefore limited to its own namespace and DNS.
+func EgressSpec(declared []string) networkingv1.NetworkPolicySpec {
+	nsPeer := func(ns string) networkingv1.NetworkPolicyPeer {
+		return networkingv1.NetworkPolicyPeer{
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"kubernetes.io/metadata.name": ns},
+			},
+		}
+	}
+	udp, tcp := corev1.ProtocolUDP, corev1.ProtocolTCP
+	dnsPort := intstr.FromInt32(53)
+	rules := []networkingv1.NetworkPolicyEgressRule{
+		{To: []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{}}}},
+		{
+			To: []networkingv1.NetworkPolicyPeer{nsPeer(DNSNamespace)},
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &udp, Port: &dnsPort},
+				{Protocol: &tcp, Port: &dnsPort},
+			},
+		},
+	}
+	if len(declared) > 0 {
+		peers := make([]networkingv1.NetworkPolicyPeer, len(declared))
+		for i, ns := range declared {
+			peers[i] = nsPeer(ns)
+		}
+		rules = append(rules, networkingv1.NetworkPolicyEgressRule{To: peers})
+	}
+	return networkingv1.NetworkPolicySpec{
+		PodSelector: metav1.LabelSelector{},
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		Egress:      rules,
 	}
 }
 
