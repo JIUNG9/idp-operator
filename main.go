@@ -39,6 +39,8 @@ func main() {
 		ingressNamespaces = flag.String("allow-ingress-from-namespaces", "", "comma-separated namespaces allowed to reach services, e.g. the ingress controller's")
 		ingressCIDRs      = flag.String("allow-ingress-from-cidrs", "", "comma-separated CIDRs allowed to reach services, for load balancers that target pod IPs directly")
 
+		enforceEgress = flag.Bool("enforce-egress", false, "turn spec.network.allowEgressTo into a NetworkPolicy that drops all other egress (same namespace and DNS stay open). A service that has not declared a dependency loses access to it, so have teams declare first. Needs a CNI that enforces NetworkPolicy")
+
 		allowedProjects = flag.String("allowed-projects", "", "comma-separated ArgoCD AppProjects a ServiceDeployment may name in spec.gitops.project. The operator writes Applications with its own privileges, so list only projects every team may use. Empty rejects every ServiceDeployment")
 		nsEnvironments  = flag.String("namespace-environments", "", "comma-separated namespace=environment pairs (prod, staging or dev). A ServiceDeployment in a listed namespace is gated as that environment whatever its spec.environment says, so a team cannot relabel prod as dev. Unlisted namespaces keep the spec value")
 		argocdNamespace = flag.String("argocd-namespace", controller.ArgoCDNamespace, "namespace where ArgoCD Applications are written")
@@ -170,6 +172,7 @@ func main() {
 			AllowIngressFromNamespaces: splitList(*ingressNamespaces),
 			AllowIngressFromCIDRs:      splitList(*ingressCIDRs),
 		},
+		EnforceEgress:         *enforceEgress,
 		AllowedProjects:       splitList(*allowedProjects),
 		ArgoCDNamespace:       *argocdNamespace,
 		NamespaceEnvironments: namespaceEnvironments,
