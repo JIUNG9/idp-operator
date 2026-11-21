@@ -13,6 +13,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -40,6 +41,7 @@ func main() {
 		ingressCIDRs      = flag.String("allow-ingress-from-cidrs", "", "comma-separated CIDRs allowed to reach services, for load balancers that target pod IPs directly")
 
 		enforceEgress = flag.Bool("enforce-egress", false, "turn spec.network.allowEgressTo into a NetworkPolicy that drops all other egress (same namespace and DNS stay open). A service that has not declared a dependency loses access to it, so have teams declare first. Needs a CNI that enforces NetworkPolicy")
+		dnsNamespace  = flag.String("dns-namespace", controller.DefaultDNSNamespace, "namespace where cluster DNS runs. Only used with -enforce-egress, whose policy admits port 53 to it; set it when DNS is not in kube-system (OpenShift: openshift-dns)")
 
 		allowedProjects = flag.String("allowed-projects", "", "comma-separated ArgoCD AppProjects a ServiceDeployment may name in spec.gitops.project. The operator writes Applications with its own privileges, so list only projects every team may use. Empty rejects every ServiceDeployment")
 		nsEnvironments  = flag.String("namespace-environments", "", "comma-separated namespace=environment pairs (prod, staging or dev). A ServiceDeployment in a listed namespace is gated as that environment whatever its spec.environment says, so a team cannot relabel prod as dev. Unlisted namespaces keep the spec value")
@@ -127,6 +129,11 @@ func main() {
 		setupLog.Info("no -allowed-projects set; every ServiceDeployment will be rejected until one is listed")
 	}
 
+	if errs := validation.IsDNS1123Label(*dnsNamespace); len(errs) > 0 {
+		setupLog.Error(nil, "invalid -dns-namespace", "value", *dnsNamespace, "reason", strings.Join(errs, "; "))
+		os.Exit(1)
+	}
+
 	namespaceEnvironments, err := controller.ParseNamespaceEnvironments(*nsEnvironments)
 	if err != nil {
 		setupLog.Error(err, "invalid -namespace-environments")
@@ -171,6 +178,7 @@ func main() {
 		Network: controller.NetworkConfig{
 			AllowIngressFromNamespaces: splitList(*ingressNamespaces),
 			AllowIngressFromCIDRs:      splitList(*ingressCIDRs),
+			DNSNamespace:               *dnsNamespace,
 		},
 		EnforceEgress:         *enforceEgress,
 		AllowedProjects:       splitList(*allowedProjects),

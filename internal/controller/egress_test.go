@@ -175,7 +175,7 @@ func TestEnforceEgressLimitsKubeSystemToDNSPort(t *testing.T) {
 
 	for _, rule := range np.Spec.Egress {
 		for _, peer := range rule.To {
-			if peer.NamespaceSelector == nil || peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != DNSNamespace {
+			if peer.NamespaceSelector == nil || peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != DefaultDNSNamespace {
 				continue
 			}
 			if len(rule.Ports) != 2 {
@@ -190,6 +190,29 @@ func TestEnforceEgressLimitsKubeSystemToDNSPort(t *testing.T) {
 		}
 	}
 	t.Fatal("no rule admits DNS")
+}
+
+// A cluster whose DNS is not in kube-system sets -dns-namespace. The DNS rule
+// must follow it, and kube-system must not stay admitted: that would open a
+// namespace the platform did not choose.
+func TestEnforceEgressUsesConfiguredDNSNamespace(t *testing.T) {
+	sd := valid()
+	c, r, req := newFixtureOpts(t, sd, nil, func(r *ServiceDeploymentReconciler) {
+		r.EnforceEgress = true
+		r.Network.DNSNamespace = "openshift-dns"
+	})
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	np := getNetworkPolicy(t, c, NetworkPolicyEgress)
+	got, _ := egressDestinations(np)
+	if strings.Join(got, ",") != "openshift-dns" {
+		t.Errorf("admitted namespaces = %v, want only openshift-dns", got)
+	}
+	cond := apimeta.FindStatusCondition(getSD(t, c, sd.Name, sd.Namespace).Status.Conditions, CondEgressDeclared)
+	if cond == nil || !strings.Contains(cond.Message, "openshift-dns") {
+		t.Errorf("condition message should name openshift-dns, got %+v", cond)
+	}
 }
 
 func TestEnforceEgressConditionStatesTheLimit(t *testing.T) {
@@ -245,7 +268,7 @@ func TestEnvtestAcceptsEgressPolicy(t *testing.T) {
 	}
 	np := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: NetworkPolicyEgress, Namespace: ns.Name},
-		Spec:       EgressSpec([]string{"payments", "ledger"}),
+		Spec:       EgressSpec([]string{"payments", "ledger"}, DefaultDNSNamespace),
 	}
 	if err := c.Create(ctx, np); err != nil {
 		t.Fatalf("API server rejected the egress policy: %v", err)

@@ -148,6 +148,7 @@ operator flags, not spec fields:
 | --- | --- |
 | `-allow-ingress-from-namespaces` | Namespaces allowed to reach every service — typically your ingress controller's. **Without this, nothing outside a service's own namespace can reach it.** |
 | `-enforce-egress` | Turns each service's `spec.network.allowEgressTo` into a NetworkPolicy that drops all other egress. Off by default. Needs a CNI that enforces NetworkPolicy |
+| `-dns-namespace` | Namespace where cluster DNS runs, default `kube-system`. Used only with `-enforce-egress`: the egress policy admits port 53 to it. Must be a DNS-1123 label |
 | `-allow-ingress-from-cidrs` | Source ranges for load balancers that target pod IPs directly and have no namespace to select (AWS Load Balancer Controller with `target-type=ip`, for one) |
 | `-cosign-key-file` | PEM public key, usually a mounted Secret, that images must be signed with |
 | `-cosign-issuer` / `-cosign-subject` | Keyless (Fulcio) verification instead of a key |
@@ -263,7 +264,7 @@ the list in the `EgressDeclared` condition.
 
 **With `-enforce-egress`, the operator creates a NetworkPolicy named `idp-egress`** in the service's
 namespace. It selects every pod and allows egress only to: pods in the same namespace, port 53 (UDP and
-TCP) in `kube-system` for DNS, and every pod in each declared namespace. All other egress is dropped, so
+TCP) in the DNS namespace (`kube-system`, or the value of `-dns-namespace`), and every pod in each declared namespace. All other egress is dropped, so
 a service that declares nothing can reach only its own namespace and DNS. The condition reason is
 `Enforced`. Turning the flag off again deletes `idp-egress`.
 
@@ -273,7 +274,7 @@ Limits:
   and that its rules list the declared namespaces; they do not prove traffic is dropped, because envtest
   has no CNI.
 - Targets are whole namespaces. External hosts, CIDRs and ports are not supported yet.
-- A DNS service outside `kube-system` is not admitted.
+- DNS is admitted in one namespace only. Set `-dns-namespace` when it is not `kube-system`.
 - Turn the flag on only after teams have declared their dependencies. Calls to the Kubernetes API server
   and to external services are dropped too.
 

@@ -744,6 +744,8 @@ func (r *ServiceDeploymentReconciler) reconcileEgress(ctx context.Context, sd *i
 		names[i] = t.Namespace
 	}
 
+	dns := r.Network.DNSNamespaceOrDefault()
+
 	if !r.EnforceEgress {
 		stale := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: NetworkPolicyEgress, Namespace: sd.Name}}
 		if err := r.deleteOwned(ctx, sd, stale); err != nil {
@@ -763,19 +765,19 @@ func (r *ServiceDeploymentReconciler) reconcileEgress(ctx context.Context, sd *i
 	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: NetworkPolicyEgress, Namespace: sd.Name}}
 	if err := r.applyManaged(ctx, sd, np, func() error {
 		np.Labels = labels
-		np.Spec = EgressSpec(names)
+		np.Spec = EgressSpec(names, dns)
 		return nil
 	}); err != nil {
 		return err
 	}
 	if len(targets) == 0 {
 		c.ready(CondEgressDeclared, "Enforced",
-			"egress limited to this namespace and DNS in "+DNSNamespace+"; no destinations declared in spec.network.allowEgressTo")
+			"egress limited to this namespace and DNS in "+dns+"; no destinations declared in spec.network.allowEgressTo")
 		return nil
 	}
 	c.ready(CondEgressDeclared, "Enforced", fmt.Sprintf(
 		"egress limited to this namespace, DNS in %s and %d declared destination(s): %s",
-		DNSNamespace, len(targets), strings.Join(names, ", ")))
+		dns, len(targets), strings.Join(names, ", ")))
 	return nil
 }
 
