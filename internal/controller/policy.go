@@ -40,6 +40,18 @@ type NetworkConfig struct {
 	// with target-type=ip puts the balancer's ENI addresses on the wire, not
 	// a pod IP.
 	AllowIngressFromCIDRs []string
+	// DNSNamespace is where cluster DNS runs, for the egress policy's DNS
+	// rule. Empty means DefaultDNSNamespace. Clusters whose DNS is not in
+	// kube-system (OpenShift runs it in openshift-dns) set it.
+	DNSNamespace string
+}
+
+// DNSNamespaceOrDefault is the namespace the egress policy admits DNS to.
+func (n NetworkConfig) DNSNamespaceOrDefault() string {
+	if n.DNSNamespace == "" {
+		return DefaultDNSNamespace
+	}
+	return n.DNSNamespace
 }
 
 // PlatformIngressConfigured reports whether anything outside the service's own
@@ -72,16 +84,17 @@ func SameNamespaceIngressSpec() networkingv1.NetworkPolicySpec {
 	}
 }
 
-// DNSNamespace is where cluster DNS runs. EgressSpec admits port 53 to it, or
-// a restricted pod could not resolve the names of the services it declared.
-const DNSNamespace = "kube-system"
+// DefaultDNSNamespace is where cluster DNS runs unless -dns-namespace says
+// otherwise. EgressSpec admits port 53 to it, or a restricted pod could not
+// resolve the names of the services it declared.
+const DefaultDNSNamespace = "kube-system"
 
 // EgressSpec restricts egress for every pod in the namespace to: pods in the
-// same namespace, DNS (port 53, UDP and TCP) in DNSNamespace, and every pod in
+// same namespace, DNS (port 53, UDP and TCP) in dnsNamespace, and every pod in
 // each declared namespace. Selecting Egress with a rule list is the default
 // deny: anything not listed is dropped. A service that declares nothing is
 // therefore limited to its own namespace and DNS.
-func EgressSpec(declared []string) networkingv1.NetworkPolicySpec {
+func EgressSpec(declared []string, dnsNamespace string) networkingv1.NetworkPolicySpec {
 	nsPeer := func(ns string) networkingv1.NetworkPolicyPeer {
 		return networkingv1.NetworkPolicyPeer{
 			NamespaceSelector: &metav1.LabelSelector{
@@ -94,7 +107,7 @@ func EgressSpec(declared []string) networkingv1.NetworkPolicySpec {
 	rules := []networkingv1.NetworkPolicyEgressRule{
 		{To: []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{}}}},
 		{
-			To: []networkingv1.NetworkPolicyPeer{nsPeer(DNSNamespace)},
+			To: []networkingv1.NetworkPolicyPeer{nsPeer(dnsNamespace)},
 			Ports: []networkingv1.NetworkPolicyPort{
 				{Protocol: &udp, Port: &dnsPort},
 				{Protocol: &tcp, Port: &dnsPort},
