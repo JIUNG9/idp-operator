@@ -6,6 +6,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	idpv1alpha1 "github.com/JIUNG9/idp-operator/api/v1alpha1"
 )
 
 // Provisioned policy object names. Prefixed so a team can add its own
@@ -91,10 +93,11 @@ const DefaultDNSNamespace = "kube-system"
 
 // EgressSpec restricts egress for every pod in the namespace to: pods in the
 // same namespace, DNS (port 53, UDP and TCP) in dnsNamespace, and every pod in
-// each declared namespace. Selecting Egress with a rule list is the default
+// each declared namespace, plus one ipBlock rule per declared CIDR limited to
+// its ports (protocol defaults to TCP). Selecting Egress with a rule list is the default
 // deny: anything not listed is dropped. A service that declares nothing is
 // therefore limited to its own namespace and DNS.
-func EgressSpec(declared []string, dnsNamespace string) networkingv1.NetworkPolicySpec {
+func EgressSpec(declared []string, cidrs []idpv1alpha1.EgressCIDRTarget, dnsNamespace string) networkingv1.NetworkPolicySpec {
 	nsPeer := func(ns string) networkingv1.NetworkPolicyPeer {
 		return networkingv1.NetworkPolicyPeer{
 			NamespaceSelector: &metav1.LabelSelector{
@@ -120,6 +123,21 @@ func EgressSpec(declared []string, dnsNamespace string) networkingv1.NetworkPoli
 			peers[i] = nsPeer(ns)
 		}
 		rules = append(rules, networkingv1.NetworkPolicyEgressRule{To: peers})
+	}
+	for _, t := range cidrs {
+		ports := make([]networkingv1.NetworkPolicyPort, len(t.Ports))
+		for i, p := range t.Ports {
+			proto := corev1.Protocol(p.Protocol)
+			if proto == "" {
+				proto = corev1.ProtocolTCP
+			}
+			port := intstr.FromInt32(p.Port)
+			ports[i] = networkingv1.NetworkPolicyPort{Protocol: &proto, Port: &port}
+		}
+		rules = append(rules, networkingv1.NetworkPolicyEgressRule{
+			To:    []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: t.CIDR}}},
+			Ports: ports,
+		})
 	}
 	return networkingv1.NetworkPolicySpec{
 		PodSelector: metav1.LabelSelector{},

@@ -44,6 +44,33 @@ type EgressTarget struct {
 	Namespace string `json:"namespace"`
 }
 
+// EgressPort is one destination port of an external egress target.
+type EgressPort struct {
+	// Port is the destination port.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+	// Protocol is TCP or UDP. Defaults to TCP.
+	// +kubebuilder:validation:Enum=TCP;UDP
+	// +kubebuilder:default=TCP
+	// +optional
+	Protocol string `json:"protocol,omitempty"`
+}
+
+// EgressCIDRTarget names one external destination by address range and ports.
+type EgressCIDRTarget struct {
+	// CIDR is the destination range in network form, for example 10.20.0.0/16
+	// or 203.0.113.7/32. Host bits must be zero.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=43
+	CIDR string `json:"cidr"`
+	// Ports limits the target to these destination ports. At least one is
+	// required: a CIDR with no ports would open every port on the range.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	Ports []EgressPort `json:"ports"`
+}
+
 // Network is what the service declares about its traffic. Slice 1 records the
 // declaration and reports it in status. No egress policy is applied yet:
 // egress default-deny only becomes safe once declared dependencies turn into
@@ -55,6 +82,15 @@ type Network struct {
 	// +listMapKey=namespace
 	// +optional
 	AllowEgressTo []EgressTarget `json:"allowEgressTo,omitempty"`
+	// AllowEgressToCIDRs lists external destinations by address range and
+	// ports. Used with the operator flag -enforce-egress, each entry becomes
+	// an ipBlock allow rule next to the namespace rules.
+	// +kubebuilder:default:={}
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=map
+	// +listMapKey=cidr
+	// +optional
+	AllowEgressToCIDRs []EgressCIDRTarget `json:"allowEgressToCIDRs,omitempty"`
 }
 
 // ServiceDeploymentSpec is the single manifest a team writes to get a

@@ -34,6 +34,7 @@ var formToCRD = map[string][]string{
 	"availabilityTarget": {"slo", "availabilityTarget"},
 	"latencyP99Ms":       {"slo", "latencyP99Ms"},
 	"allowEgressTo":      {"network", "allowEgressTo"},
+	"allowEgressToCIDRs": {"network", "allowEgressToCIDRs"},
 	"repoURL":            {"gitops", "repoURL"},
 	"path":               {"gitops", "path"},
 	"targetRevision":     {"gitops", "targetRevision"},

@@ -14,6 +14,7 @@ spec:
     latencyP99Ms: ${{ values.latencyP99Ms }}
   network:
     allowEgressTo: ${{ values.allowEgressTo | dump }}
+    allowEgressToCIDRs: ${{ values.allowEgressToCIDRs | dump }}
   gitops:
     repoURL: ${{ values.repoURL }}
     path: ${{ values.path }}

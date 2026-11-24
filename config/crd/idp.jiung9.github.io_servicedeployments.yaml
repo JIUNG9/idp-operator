@@ -131,6 +131,59 @@ spec:
                     x-kubernetes-list-map-keys:
                     - namespace
                     x-kubernetes-list-type: map
+                  allowEgressToCIDRs:
+                    default: []
+                    description: |-
+                      AllowEgressToCIDRs lists external destinations by address range and
+                      ports. Used with the operator flag -enforce-egress, each entry becomes
+                      an ipBlock allow rule next to the namespace rules.
+                    items:
+                      description: EgressCIDRTarget names one external destination
+                        by address range and ports.
+                      properties:
+                        cidr:
+                          description: |-
+                            CIDR is the destination range in network form, for example 10.20.0.0/16
+                            or 203.0.113.7/32. Host bits must be zero.
+                          maxLength: 43
+                          minLength: 1
+                          type: string
+                        ports:
+                          description: |-
+                            Ports limits the target to these destination ports. At least one is
+                            required: a CIDR with no ports would open every port on the range.
+                          items:
+                            description: EgressPort is one destination port of an
+                              external egress target.
+                            properties:
+                              port:
+                                description: Port is the destination port.
+                                format: int32
+                                maximum: 65535
+                                minimum: 1
+                                type: integer
+                              protocol:
+                                default: TCP
+                                description: Protocol is TCP or UDP. Defaults to TCP.
+                                enum:
+                                - TCP
+                                - UDP
+                                type: string
+                            required:
+                            - port
+                            type: object
+                          maxItems: 16
+                          minItems: 1
+                          type: array
+                      required:
+                      - cidr
+                      - ports
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - cidr
+                    x-kubernetes-list-type: map
                 type: object
               replicas:
                 default: 1
