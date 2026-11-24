@@ -739,10 +739,15 @@ func (r *ServiceDeploymentReconciler) reconcileNetworkPolicies(ctx context.Conte
 // proof that the cluster's network plugin implements NetworkPolicy.
 func (r *ServiceDeploymentReconciler) reconcileEgress(ctx context.Context, sd *idpv1alpha1.ServiceDeployment, labels map[string]string, c *components) error {
 	targets := sd.Spec.Network.AllowEgressTo
-	names := make([]string, len(targets))
-	for i, t := range targets {
-		names[i] = t.Namespace
+	cidrs := sd.Spec.Network.AllowEgressToCIDRs
+	names := make([]string, 0, len(targets)+len(cidrs))
+	for _, t := range targets {
+		names = append(names, t.Namespace)
 	}
+	for _, t := range cidrs {
+		names = append(names, describeCIDRTarget(t))
+	}
+	declared := len(names)
 
 	dns := r.Network.DNSNamespaceOrDefault()
 
@@ -751,34 +756,48 @@ func (r *ServiceDeploymentReconciler) reconcileEgress(ctx context.Context, sd *i
 		if err := r.deleteOwned(ctx, sd, stale); err != nil {
 			return err
 		}
-		if len(targets) == 0 {
+		if declared == 0 {
 			c.ready(CondEgressDeclared, "NoneDeclared",
-				"no egress destinations declared in spec.network.allowEgressTo; egress is not restricted")
+				"no egress destinations declared in spec.network; egress is not restricted")
 			return nil
 		}
 		c.ready(CondEgressDeclared, "Declared", fmt.Sprintf(
 			"%d egress destination(s) declared: %s; the operator runs without -enforce-egress, so egress is not restricted",
-			len(targets), strings.Join(names, ", ")))
+			declared, strings.Join(names, ", ")))
 		return nil
 	}
 
+	nsNames := names[:len(targets)]
 	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: NetworkPolicyEgress, Namespace: sd.Name}}
 	if err := r.applyManaged(ctx, sd, np, func() error {
 		np.Labels = labels
-		np.Spec = EgressSpec(names, dns)
+		np.Spec = EgressSpec(nsNames, cidrs, dns)
 		return nil
 	}); err != nil {
 		return err
 	}
-	if len(targets) == 0 {
+	if declared == 0 {
 		c.ready(CondEgressDeclared, "Enforced",
-			"egress limited to this namespace and DNS in "+dns+"; no destinations declared in spec.network.allowEgressTo")
+			"egress limited to this namespace and DNS in "+dns+"; no destinations declared in spec.network")
 		return nil
 	}
 	c.ready(CondEgressDeclared, "Enforced", fmt.Sprintf(
 		"egress limited to this namespace, DNS in %s and %d declared destination(s): %s",
-		dns, len(targets), strings.Join(names, ", ")))
+		dns, declared, strings.Join(names, ", ")))
 	return nil
+}
+
+// describeCIDRTarget renders "203.0.113.0/24:443/TCP,53/UDP" for condition messages.
+func describeCIDRTarget(t idpv1alpha1.EgressCIDRTarget) string {
+	ports := make([]string, len(t.Ports))
+	for i, p := range t.Ports {
+		proto := p.Protocol
+		if proto == "" {
+			proto = "TCP"
+		}
+		ports[i] = fmt.Sprintf("%d/%s", p.Port, proto)
+	}
+	return t.CIDR + ":" + strings.Join(ports, ",")
 }
 
 // reconcileAdmissionPolicy installs the Kyverno baseline. Kyverno is not a

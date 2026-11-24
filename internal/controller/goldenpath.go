@@ -4,6 +4,7 @@ package controller
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strconv"
 
@@ -84,6 +85,31 @@ func Validate(sd *idpv1alpha1.ServiceDeployment) error {
 			return fmt.Errorf("spec.network.allowEgressTo lists namespace %q twice", t.Namespace)
 		}
 		seen[t.Namespace] = true
+	}
+	seenCIDR := map[netip.Prefix]bool{}
+	for i, t := range sd.Spec.Network.AllowEgressToCIDRs {
+		p, err := netip.ParsePrefix(t.CIDR)
+		if err != nil {
+			return fmt.Errorf("spec.network.allowEgressToCIDRs[%d].cidr %q is not a CIDR: %v", i, t.CIDR, err)
+		}
+		if p != p.Masked() {
+			return fmt.Errorf("spec.network.allowEgressToCIDRs[%d].cidr %q has host bits set; write %s", i, t.CIDR, p.Masked())
+		}
+		if seenCIDR[p] {
+			return fmt.Errorf("spec.network.allowEgressToCIDRs lists cidr %q twice", t.CIDR)
+		}
+		seenCIDR[p] = true
+		if len(t.Ports) == 0 {
+			return fmt.Errorf("spec.network.allowEgressToCIDRs[%d] needs at least one port", i)
+		}
+		for j, port := range t.Ports {
+			if port.Port < 1 || port.Port > 65535 {
+				return fmt.Errorf("spec.network.allowEgressToCIDRs[%d].ports[%d].port %d must be between 1 and 65535", i, j, port.Port)
+			}
+			if port.Protocol != "" && port.Protocol != "TCP" && port.Protocol != "UDP" {
+				return fmt.Errorf("spec.network.allowEgressToCIDRs[%d].ports[%d].protocol %q must be TCP or UDP", i, j, port.Protocol)
+			}
+		}
 	}
 	return nil
 }

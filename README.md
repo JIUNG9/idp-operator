@@ -260,11 +260,29 @@ spec:
 Each `namespace` must be a DNS-1123 label, and a namespace may appear once. The operator records
 the list in the `EgressDeclared` condition.
 
+`spec.network.allowEgressToCIDRs` lists destinations outside the cluster by address range and ports:
+
+```yaml
+spec:
+  network:
+    allowEgressToCIDRs:
+      - cidr: 203.0.113.0/24
+        ports:
+          - port: 443
+          - port: 53
+            protocol: UDP
+```
+
+`cidr` must be in network form (host bits zero, IPv4 or IPv6) and may appear once. `ports` needs at
+least one entry, each from 1 to 65535, `protocol` `TCP` (the default) or `UDP`. A CIDR with no ports is
+rejected, because it would open every port on the range. `0.0.0.0/0` is accepted, so it is the platform
+team's call whether to allow it in review.
+
 **Without `-enforce-egress`, egress stays unrestricted** and the condition message says so.
 
 **With `-enforce-egress`, the operator creates a NetworkPolicy named `idp-egress`** in the service's
 namespace. It selects every pod and allows egress only to: pods in the same namespace, port 53 (UDP and
-TCP) in the DNS namespace (`kube-system`, or the value of `-dns-namespace`), and every pod in each declared namespace. All other egress is dropped, so
+TCP) in the DNS namespace (`kube-system`, or the value of `-dns-namespace`), every pod in each declared namespace, and each declared CIDR on its listed ports (one `ipBlock` rule per CIDR). All other egress is dropped, so
 a service that declares nothing can reach only its own namespace and DNS. The condition reason is
 `Enforced`. Turning the flag off again deletes `idp-egress`.
 
@@ -273,7 +291,7 @@ Limits:
 - The policy is only as strong as the CNI. The operator's tests prove the API server accepts the policy
   and that its rules list the declared namespaces; they do not prove traffic is dropped, because envtest
   has no CNI.
-- Targets are whole namespaces. External hosts, CIDRs and ports are not supported yet.
+- Namespace targets cover every pod and port in the namespace. External targets are address ranges: hostnames (FQDN) are not supported, and `ipBlock` is matched on the destination address the CNI sees, so a range behind a NAT or a service mesh egress gateway may need the gateway's address instead.
 - DNS is admitted in one namespace only. Set `-dns-namespace` when it is not `kube-system`.
 - Turn the flag on only after teams have declared their dependencies. Calls to the Kubernetes API server
   and to external services are dropped too.
@@ -319,8 +337,8 @@ that test.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md). Next up: external egress targets (CIDR and port) for
-`spec.network.allowEgressTo`, and a namespace-label mapping for `spec.environment`.
+See [ROADMAP.md](ROADMAP.md). Next up: a kind e2e with a policy-enforcing CNI, and a namespace-label
+mapping for `spec.environment`.
 
 ## Development
 
