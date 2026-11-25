@@ -170,8 +170,9 @@ StatefulSet. It reads nothing but Deployments, StatefulSets, Rollouts and Pods.
 - **`spec.network.allowEgressTo`** — declared dependencies become egress policy. Split
   out of M2 on purpose. The field, its validation, the `EgressDeclared` status condition
   and the `-enforce-egress` flag (an `idp-egress` NetworkPolicy built from the list) are
-  done. The DNS namespace is configurable (`-dns-namespace`). External targets (CIDR and ports, `allowEgressToCIDRs`) are done. Not done: a
-  kind e2e that shows a blocked connection, since envtest has no CNI.
+  done. The DNS namespace is configurable (`-dns-namespace`). External targets (CIDR and ports, `allowEgressToCIDRs`) are done. A kind e2e on
+  Calico (`test/e2e/egress.sh`) shows a declared namespace reachable and an undeclared one
+  blocked. Not done: running it in CI (a workflow change).
 - **Namespace-label environment mapping** — `-namespace-environments` maps a namespace
   name to an environment and overrides `spec.environment` (done). Mapping by a namespace
   label is not implemented: a team that can label its own namespace could still pick its

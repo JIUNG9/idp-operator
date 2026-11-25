@@ -78,6 +78,8 @@ This is a young project and says so. What works today:
   cluster and proves the two things envtest structurally cannot: that the Kyverno
   baseline **rejects** a privileged pod rather than merely existing, and that the
   PodDisruptionBudget really selects a correctly labelled workload
+- A second kind test (`./test/e2e/egress.sh`) on a Calico cluster that shows `-enforce-egress`
+  dropping a connection: a service reaches the namespace it declared and not one it did not
 
 ## Why SLO-first
 
@@ -337,8 +339,7 @@ that test.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md). Next up: a kind e2e with a policy-enforcing CNI, and a namespace-label
-mapping for `spec.environment`.
+See [ROADMAP.md](ROADMAP.md). Next up: a namespace-label mapping for `spec.environment`.
 
 ## Development
 
@@ -354,7 +355,11 @@ deletes it on exit:
 
 ```
 ./test/e2e/e2e.sh          # KEEP=1 to leave the cluster up for inspection
+./test/e2e/egress.sh       # Calico cluster; egress enforcement, about 4 minutes
 ```
+
+`egress.sh` needs network access to `raw.githubusercontent.com` (the Calico manifest) and
+`registry.k8s.io` (the probe image). It is not part of the CI workflow yet.
 
 ## License
 
