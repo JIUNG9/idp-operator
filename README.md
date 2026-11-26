@@ -156,8 +156,12 @@ operator flags, not spec fields:
 | `-cosign-issuer` / `-cosign-subject` | Keyless (Fulcio) verification instead of a key |
 | `-verify-image-references` | Image globs verification applies to (default `*`) |
 | `-require-image-digests` | Reject images referenced by tag. Off by default; see below |
+| `-allowed-projects` | ArgoCD AppProjects a `ServiceDeployment` may name in `spec.gitops.project`. Unset rejects every `ServiceDeployment`; see [Allowed ArgoCD projects](#allowed-argocd-projects) |
+| `-argocd-namespace` | Namespace the ArgoCD Applications are written to (default `argocd`) |
+| `-namespace-environments` | `namespace=environment` pairs (`prod`, `staging`, `dev`) that override `spec.environment` for objects in a listed namespace; see the `spec.environment` note below |
 | `-prometheus-url` | Where to read error budgets from. **Empty means delivery is not budget-gated at all** |
 | `-burn-query` | Go template for the instant query returning a service's error ratio (`{{.Namespace}}`, `{{.Name}}`, `{{.Window}}`) |
+| `-burn-query-timeout` | How long one Prometheus query may take before the reading counts as no evidence and the gate fails closed (default 10s) |
 | `-budget-reevaluation-interval` | How stale a reading may get, and the pace of the anti-flapping rule (default 5m) |
 | `-static-budget` | A fixed budget fraction instead of Prometheus. Demos and testing only |
 
