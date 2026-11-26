@@ -143,8 +143,8 @@ stopping it is friction with nothing on the other side.
 
 ## Platform configuration
 
-Two things belong to the cluster rather than to any one service, so they are
-operator flags, not spec fields:
+Settings that belong to the cluster rather than to any one service are operator flags, not
+spec fields:
 
 | Flag | What it does |
 | --- | --- |
