@@ -1,7 +1,12 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -105,4 +110,83 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// Operator flags are the platform contract, so an undocumented one is a
+// setting nobody knows to turn on. main() defines them as locals and exits on
+// bad config, which a test can't call, so read the definitions from the source.
+func TestEveryFlagIsInReadmeTable(t *testing.T) {
+	defined := flagNamesInMain(t)
+	if len(defined) < 15 {
+		t.Fatalf("found only %d flags in main.go, the parser has probably stopped matching: %v", len(defined), defined)
+	}
+	documented := flagNamesInReadmeTables(t)
+	for _, name := range defined {
+		if !documented[name] {
+			t.Errorf("flag -%s is defined in main.go but has no row in the README flag tables", name)
+		}
+	}
+	definedSet := map[string]bool{}
+	for _, name := range defined {
+		definedSet[name] = true
+	}
+	for name := range documented {
+		if !definedSet[name] {
+			t.Errorf("README documents -%s but main.go does not define it", name)
+		}
+	}
+}
+
+// flagNamesInMain returns the first argument of every flag.String, flag.Bool,
+// flag.Duration and similar call in main.go.
+func flagNamesInMain(t *testing.T) []string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "flag" {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "String", "Bool", "Int", "Int64", "Uint", "Uint64", "Float64", "Duration":
+			if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				name, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				names = append(names, name)
+			}
+		}
+		return true
+	})
+	return names
+}
+
+var (
+	readmeRowFirstCell = regexp.MustCompile("(?m)^\\|([^|]*)\\|")
+	readmeFlagToken    = regexp.MustCompile("`-([a-z][a-z0-9-]*)`")
+)
+
+// flagNamesInReadmeTables returns the flag names in the first cell of each
+// table row, so a flag named only in prose elsewhere does not count.
+func flagNamesInReadmeTables(t *testing.T) map[string]bool {
+	t.Helper()
+	got := map[string]bool{}
+	for _, row := range readmeRowFirstCell.FindAllStringSubmatch(readFile(t, "README.md"), -1) {
+		for _, m := range readmeFlagToken.FindAllStringSubmatch(row[1], -1) {
+			got[m[1]] = true
+		}
+	}
+	return got
 }
